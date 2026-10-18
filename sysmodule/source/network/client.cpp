@@ -50,6 +50,15 @@
 namespace ryu_ldn {
 namespace network {
 
+namespace {
+
+/// Reconnect attempts after a drop before giving up to Disconnected
+/// (about 65 s of backoff: 0.2, 1, 2, 4, 8, then 10 s). ldn reconnects on
+/// demand at the next Scan/Connect/CreateNetwork after that.
+constexpr uint16_t kMaxReconnectAttempts = 10;
+
+} // anonymous namespace
+
 
 // ============================================================================
 // RyuLdnClientConfig Implementation
@@ -88,6 +97,7 @@ RyuLdnClientConfig::RyuLdnClientConfig()
     host[sizeof(host) - 1] = '\0';
     passphrase[0] = '\0';  // Empty passphrase = public rooms
     std::memset(&server, 0, sizeof(server));  // transport = None: connect() refuses
+    reconnect.max_retries = kMaxReconnectAttempts;
 }
 
 /**
@@ -120,7 +130,7 @@ RyuLdnClientConfig::RyuLdnClientConfig(const config::Config& cfg)
     reconnect.max_delay_ms = 10000;     // 10s max (10x initial)
     reconnect.multiplier_percent = 200;  // 2x
     reconnect.jitter_percent = 10;
-    reconnect.max_retries = 0;  // 0 disables auto-reconnect (see AGENTS.md: "max_reconnect_attempts = 0 disables auto-reconnect entirely")
+    reconnect.max_retries = kMaxReconnectAttempts;  // then give up to Disconnected
 }
 
 // ============================================================================
@@ -408,12 +418,19 @@ ClientOpResult RyuLdnClient::connect(const char* host, uint16_t port) {
     std::scoped_lock lock(m_conn_mutex);
     LOG_INFO("Connecting to %s:%u", host ? host : m_config.host, port);
 
-    // Check if already connected or connecting
-    if (m_state_machine.is_connected() || m_state_machine.is_transitioning()) {
-        if (m_state_machine.get_state() != ConnectionState::Backoff) {
-            LOG_WARN("Already connected or connecting");
-            return ClientOpResult::AlreadyConnected;
-        }
+    // Connected, Handshaking or Ready: the session (or its handshake) is
+    // already up, which is what the caller asked for
+    if (m_state_machine.is_connected()) {
+        LOG_INFO("connect: already %s",
+                 ConnectionStateMachine::state_to_string(m_state_machine.get_state()));
+        return ClientOpResult::Success;
+    }
+
+    // Waiting to retry: drop the timer and connect now with a fresh budget
+    if (m_state_machine.get_state() == ConnectionState::Backoff) {
+        LOG_INFO("connect: cancelling backoff to connect now");
+        m_state_machine.process_event(ConnectionEvent::Disconnect);
+        m_reconnect_manager.reset();
     }
 
     // Update config with new host/port
@@ -600,8 +617,8 @@ void RyuLdnClient::handle_connection_lost(ConnectionEvent event) {
     m_tcp_client->disconnect();
     m_handshake_sent = false;
     m_pending_ping_count = 0;
-    if (m_state_machine.get_state() == ConnectionState::Backoff && m_config.auto_reconnect) {
-        start_backoff();
+    if (m_state_machine.get_state() == ConnectionState::Backoff) {
+        start_backoff();  // or give up to Disconnected
     }
     if (m_state_callback && before_state != m_state_machine.get_state()) {
         m_state_callback(before_state, m_state_machine.get_state(), m_state_callback_user_data);
@@ -1022,7 +1039,7 @@ void RyuLdnClient::try_connect() {
         // Connection successful
         ConnectionState before_state = m_state_machine.get_state();
         m_state_machine.process_event(ConnectionEvent::ConnectSuccess);
-        m_reconnect_manager.reset();
+        // The retry budget resets at Ready, so handshake failures count too
         if (m_state_callback) {
             m_state_callback(before_state, m_state_machine.get_state(), m_state_callback_user_data);
         }
@@ -1031,13 +1048,7 @@ void RyuLdnClient::try_connect() {
         // Connection failed
         ConnectionState before_state = m_state_machine.get_state();
         m_state_machine.process_event(ConnectionEvent::ConnectFailed);
-        m_reconnect_manager.record_failure();
-
-        // Start backoff if auto-reconnect is enabled
-        if (m_config.auto_reconnect) {
-            LOG_VERBOSE("Starting backoff, retry %u", m_reconnect_manager.get_retry_count());
-            start_backoff();
-        }
+        start_backoff();  // or give up to Disconnected
         if (m_state_callback) {
             m_state_callback(before_state, m_state_machine.get_state(), m_state_callback_user_data);
         }
@@ -1195,11 +1206,21 @@ void RyuLdnClient::generate_mac_address() {
 }
 
 /**
- * @brief Start backoff timer
+ * @brief Start backoff timer, or give up
  *
- * Records the current time and calculates backoff delay.
+ * Records the current time and calculates the backoff delay. With
+ * auto_reconnect off, or once reconnect.max_retries attempts have failed,
+ * it leaves Backoff for Disconnected instead.
  */
 void RyuLdnClient::start_backoff() {
+    if (!m_config.auto_reconnect ||
+        m_reconnect_manager.should_retry() != RetryResult::ShouldRetry) {
+        LOG_WARN("Reconnect: giving up after %u attempts", m_reconnect_manager.get_retry_count());
+        m_state_machine.process_event(ConnectionEvent::Disconnect);  // Backoff -> Disconnected
+        m_reconnect_manager.reset();
+        return;
+    }
+
     // Use m_last_update_time_ms if available (called from within update()),
     // otherwise leave as 0 so is_backoff_expired() captures time on first check.
     // This handles the case where start_backoff() is called from connect()
@@ -1211,6 +1232,9 @@ void RyuLdnClient::start_backoff() {
     static uint32_t backoff_counter = 0;
     uint32_t seed = (m_reconnect_manager.get_retry_count() + 1) * 2654435761u + (++backoff_counter * 40503u);
     m_current_backoff_delay_ms = m_reconnect_manager.get_next_delay_ms_with_jitter(seed);
+    // Count this attempt after taking its delay, so the first retry gets
+    // the fast delay
+    m_reconnect_manager.record_failure();
     LOG_INFO("start_backoff: delay=%u ms, retry=%u, start_time=%lu",
              m_current_backoff_delay_ms, m_reconnect_manager.get_retry_count(), m_backoff_start_time_ms);
 }
@@ -1288,6 +1312,7 @@ bool RyuLdnClient::process_handshake_response(protocol::PacketId id,
             m_last_error_code = protocol::NetworkErrorCode::None;
             ConnectionState before_hs = m_state_machine.get_state();
             m_state_machine.process_event(ConnectionEvent::HandshakeSuccess);
+            m_reconnect_manager.reset();
             if (m_state_callback) {
                 m_state_callback(before_hs, m_state_machine.get_state(), m_state_callback_user_data);
             }
@@ -1326,6 +1351,7 @@ bool RyuLdnClient::process_handshake_response(protocol::PacketId id,
             {
                 ConnectionState before_hs = m_state_machine.get_state();
                 m_state_machine.process_event(ConnectionEvent::HandshakeSuccess);
+                m_reconnect_manager.reset();
                 if (m_state_callback) {
                     m_state_callback(before_hs, m_state_machine.get_state(), m_state_callback_user_data);
                 }

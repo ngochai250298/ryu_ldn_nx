@@ -217,9 +217,7 @@ uint32_t ReconnectManager::get_next_delay_ms_with_jitter(uint32_t seed) const {
  * @return RetryResult::MaxRetriesReached if limit exceeded
  */
 RetryResult ReconnectManager::should_retry() const {
-    // max_retries = 0 disables auto-reconnect entirely
-    // (see AGENTS.md: "max_reconnect_attempts = 0 disables auto-reconnect
-    // entirely — it does not mean infinite retries")
+    // max_retries = 0 allows no retries at all (not infinite)
     if (m_config.max_retries == 0) {
         return RetryResult::MaxRetriesReached;
     }

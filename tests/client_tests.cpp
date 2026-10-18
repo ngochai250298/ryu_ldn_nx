@@ -726,7 +726,10 @@ bool test_connect_fail_backoff() {
 }
 
 /**
- * @brief Test connect failure with auto_reconnect=false stays in Backoff
+ * @brief Test connect failure with auto_reconnect=false ends in Disconnected
+ *
+ * It used to park in Backoff with no timer, and the next update() retried
+ * anyway.
  */
 bool test_connect_fail_no_reconnect() {
     MockTcpClient* mock;
@@ -734,12 +737,12 @@ bool test_connect_fail_no_reconnect() {
 
     mock->next_connect_result = ClientResult::ConnectionFailed;
     client->connect("127.0.0.1", 30456);
-    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
     return true;
 }
 
 /**
- * @brief Test connect() returns AlreadyConnected when already connected
+ * @brief Test connect() while connected or Ready succeeds without reconnecting
  */
 bool test_connect_already_connected() {
     MockTcpClient* mock;
@@ -749,7 +752,14 @@ bool test_connect_already_connected() {
     client->connect("127.0.0.1", 30456);
 
     ClientOpResult result = client->connect("127.0.0.1", 30456);
-    ASSERT_EQ(result, ClientOpResult::AlreadyConnected);
+    ASSERT_EQ(result, ClientOpResult::Success);
+    ASSERT_EQ(mock->connect_call_count, 1);
+
+    drive_to_ready(client.get(), mock, 1000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
+    ASSERT_EQ(client->connect(), ClientOpResult::Success);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
+    ASSERT_EQ(mock->connect_call_count, 1);
     return true;
 }
 
@@ -1038,7 +1048,7 @@ bool test_update_handshaking_recv_disconnect() {
 }
 
 /**
- * @brief Test handshake timeout with auto_reconnect=false still transitions to Backoff
+ * @brief Test handshake timeout with auto_reconnect=false gives up to Disconnected
  */
 bool test_handshake_timeout_no_reconnect() {
     MockTcpClient* mock;
@@ -1052,7 +1062,8 @@ bool test_handshake_timeout_no_reconnect() {
     mock->next_recv_result = ClientResult::Timeout;
     client->update(7000);
 
-    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
+    ASSERT_TRUE(!mock->is_connected());
     return true;
 }
 
@@ -1150,10 +1161,7 @@ bool test_update_backoff_expiry_and_retry() {
 }
 
 /**
- * @brief Test that with auto_reconnect=false, Backoff state persists
- *
- * The state machine still transitions to Backoff, but no retry timer
- * is started, so the client stays in Backoff indefinitely.
+ * @brief Test that with auto_reconnect=false a failure never retries
  */
 bool test_update_backoff_no_reconnect() {
     MockTcpClient* mock;
@@ -1161,10 +1169,12 @@ bool test_update_backoff_no_reconnect() {
 
     mock->next_connect_result = ClientResult::ConnectionFailed;
     client->connect("127.0.0.1", 30456);
-    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
 
     client->update(50000);
-    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    client->update(60000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
+    ASSERT_EQ(mock->connect_call_count, 1);
     return true;
 }
 
@@ -1278,6 +1288,114 @@ bool test_transport_drop_with_generic_error_leaves_ready() {
 }
 
 // ============================================================================
+// Reconnect policy (finding 6)
+// ============================================================================
+
+/**
+ * @brief connect() during Backoff cancels the timer and connects at once
+ *
+ * ldn's ConnectToServer used to get InvalidState here, forever.
+ */
+bool test_connect_from_backoff_connects_now() {
+    MockTcpClient* mock;
+    auto client = make_client(mock);
+
+    mock->next_connect_result = ClientResult::ConnectionFailed;
+    client->connect("127.0.0.1", 30456);
+    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+
+    mock->next_connect_result = ClientResult::Success;
+    ASSERT_EQ(client->connect(), ClientOpResult::Success);
+    ASSERT_EQ(mock->connect_call_count, 2);
+    ASSERT_EQ(client->get_state(), ConnectionState::Connected);
+    return true;
+}
+
+/**
+ * @brief The first retry uses the 200 ms fast delay
+ */
+bool test_first_retry_uses_fast_delay() {
+    MockTcpClient* mock;
+    auto client = make_client(mock);
+
+    mock->next_connect_result = ClientResult::ConnectionFailed;
+    client->connect("127.0.0.1", 30456);
+    client->update(10000);        // starts the timer
+    client->update(10000 + 250);  // 200 ms +10% jitter has passed
+    ASSERT_EQ(mock->connect_call_count, 2);
+    return true;
+}
+
+/**
+ * @brief Drive Backoff/retry cycles until the client stops retrying
+ * @return number of transport connect() calls, or 0 if it never gave up
+ */
+static uint32_t run_until_gave_up(RyuLdnClient* client, MockTcpClient* mock, uint64_t t) {
+    for (int i = 0; i < 200; i++) {
+        t += 20000;  // past any backoff delay (10 s cap)
+        client->update(t);
+        if (client->get_state() == ConnectionState::Disconnected) {
+            return mock->connect_call_count;
+        }
+    }
+    return 0;
+}
+
+/**
+ * @brief Connect failures stop after the retry limit, in Disconnected
+ */
+bool test_retry_limit_gives_up() {
+    MockTcpClient* mock;
+    auto client = make_client(mock);
+    ASSERT_EQ(client->get_config().reconnect.max_retries, 10);
+
+    mock->next_connect_result = ClientResult::ConnectionFailed;
+    client->connect("127.0.0.1", 30456);
+    ASSERT_EQ(run_until_gave_up(client.get(), mock, 1000), 1u + 10u);
+    ASSERT_EQ(client->get_retry_count(), 0u);
+
+    // A later connect() starts with a full budget
+    mock->next_connect_result = ClientResult::Success;
+    ASSERT_EQ(client->connect(), ClientOpResult::Success);
+    ASSERT_TRUE(client->is_connected());
+    return true;
+}
+
+/**
+ * @brief Handshake failures count toward the limit; Ready resets it
+ *
+ * The budget used to reset on every TCP connect, so a relay that
+ * accepted TCP and then failed the handshake was retried forever.
+ */
+bool test_handshake_failures_count_toward_limit() {
+    MockTcpClient* mock;
+    auto client = make_client(mock);
+
+    mock->next_connect_result = ClientResult::Success;
+    mock->next_send_result = ClientResult::InternalError;  // handshake send fails
+    client->connect("127.0.0.1", 30456);
+    ASSERT_EQ(run_until_gave_up(client.get(), mock, 1000), 1u + 10u);
+
+    // One failure, then a good handshake: the count goes back to 0
+    mock->next_send_result = ClientResult::Success;
+    mock->next_connect_result = ClientResult::ConnectionFailed;
+    client->connect("127.0.0.1", 30456);
+    ASSERT_EQ(client->get_retry_count(), 1u);
+    mock->next_connect_result = ClientResult::Success;
+    client->update(500000);  // backoff long expired: retries, Connected
+    client->update(520000);  // sends the handshake
+    ASSERT_EQ(client->get_state(), ConnectionState::Handshaking);
+    MockPacket init_pkt;
+    init_pkt.id = PacketId::Initialize;
+    init_pkt.data.resize(sizeof(InitializeMessage));
+    mock->recv_queue.push(std::move(init_pkt));
+    client->update(520100);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
+    ASSERT_EQ(client->get_retry_count(), 0u);
+    return true;
+}
+
+// ============================================================================
 // Concurrency (finding 7)
 // ============================================================================
 
@@ -1336,7 +1454,9 @@ bool test_concurrent_connect_disconnect_vs_update() {
         uint64_t t = 1000;
         while (!stop) {
             client.update(t += 5);
-            std::this_thread::yield();
+            // Like ldn's ReceiveThreadFunc; std::mutex is not fair, so a
+            // bare re-lock loop would starve the IPC thread
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         finished++;
     });
@@ -2310,41 +2430,24 @@ bool test_send_initialize_generic_failure() {
 // ============================================================================
 
 /**
- * @brief Test that update(Backoff) with auto_reconnect=false and expired
- *        backoff still transitions to Retrying (but no auto-start_backoff)
- *
- * Even with auto_reconnect=false, is_backoff_expired() can be true
- * if time has advanced. The state machine allows BackoffExpired → Retrying.
+ * @brief Test that a dropped Ready session with auto_reconnect=false
+ *        closes the transport and stays Disconnected
  */
 bool test_update_backoff_expired_no_reconnect_stays() {
     MockTcpClient* mock;
     auto client = make_client_no_reconnect(mock);
+    drive_to_ready(client.get(), mock, 1000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
 
-    mock->next_connect_result = ClientResult::ConnectionFailed;
-    client->connect("127.0.0.1", 30456);
-    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    mock->next_recv_result = ClientResult::ConnectionLost;
+    client->update(2000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
 
-    // Advance time past backoff delay, but with no auto reconnect,
-    // start_backoff was called in try_connect → sets m_backoff_start_time_ms
+    mock->next_connect_result = ClientResult::Success;
     client->update(50000);
     client->update(60000);
-
-    // With auto_reconnect=false, we still entered Backoff but try_connect
-    // wasn't called from BackoffExpired because... actually let's check:
-    // start_backoff IS called in try_connect on failure even with
-    // auto_reconnect=false? No - looking at try_connect():
-    // if (m_config.auto_reconnect) { start_backoff(); }
-    // So with auto_reconnect=false, start_backoff() is NOT called,
-    // m_backoff_start_time_ms stays 0, is_backoff_expired() captures time
-    // on first check, returns false. Second check returns true.
-    // Then BackoffExpired → Retrying → try_connect → fail → ...
-    // but auto_reconnect=false so no start_backoff → stays in... what?
-    // BackoffExpired → Retrying, try_connect fails → ConnectFailed → Backoff
-    // but no start_backoff means m_backoff_start_time_ms stays at previous value.
-    // Actually let's just check the state.
-    ASSERT_TRUE(client->get_state() == ConnectionState::Backoff
-                || client->get_state() == ConnectionState::Retrying
-                || client->get_state() == ConnectionState::Disconnected);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
+    ASSERT_EQ(mock->connect_call_count, 1);
     return true;
 }
 
@@ -2565,6 +2668,10 @@ int main() {
     RUN_TEST(test_update_error_state_noop);
     RUN_TEST(test_send_scan_connection_lost_callback);
     RUN_TEST(test_transport_drop_with_generic_error_leaves_ready);
+    RUN_TEST(test_connect_from_backoff_connects_now);
+    RUN_TEST(test_first_retry_uses_fast_delay);
+    RUN_TEST(test_retry_limit_gives_up);
+    RUN_TEST(test_handshake_failures_count_toward_limit);
     RUN_TEST(test_concurrent_connect_disconnect_vs_update);
 
     printf("\nconnect() edge cases:\n");
