@@ -19,6 +19,7 @@ IMPL_SOURCES := \
 	../../sysmodule/source/debug/log.cpp \
 	../../sysmodule/source/network/socket.cpp \
 	../../sysmodule/source/network/tcp_client.cpp \
+	../../sysmodule/source/network/wss_client.cpp \
 	../../sysmodule/source/network/connection_state.cpp \
 	../../sysmodule/source/network/reconnect.cpp \
 	../../sysmodule/source/network/client.cpp
@@ -38,8 +39,8 @@ CXXFLAGS_ACT := $(CXXFLAGS)
 LDFLAGS_ACT :=
 endif
 
-$(TARGET): integration_tests.o config.o config_manager.o log.o socket.o tcp_client.o connection_state.o reconnect.o client.o
-	$(CXX) $(LDFLAGS_ACT) -o $@ $^ -lpthread
+$(TARGET): integration_tests.o config.o config_manager.o log.o socket.o tcp_client.o wss_client.o connection_state.o reconnect.o client.o
+	$(CXX) $(LDFLAGS_ACT) -o $@ $^ -lmbedtls -lmbedx509 -lmbedcrypto -lpthread
 
 # Compile test source
 integration_tests.o: integration_tests.cpp \
@@ -66,6 +67,9 @@ socket.o: ../../sysmodule/source/network/socket.cpp
 	$(CXX) $(CXXFLAGS_ACT) -c -o $@ $<
 
 tcp_client.o: ../../sysmodule/source/network/tcp_client.cpp
+	$(CXX) $(CXXFLAGS_ACT) -c -o $@ $<
+
+wss_client.o: ../../sysmodule/source/network/wss_client.cpp
 	$(CXX) $(CXXFLAGS_ACT) -c -o $@ $<
 
 connection_state.o: ../../sysmodule/source/network/connection_state.cpp

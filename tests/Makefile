@@ -9,6 +9,9 @@ CXXFLAGS += -I../sysmodule/source
 CXXFLAGS += -DTEST_BUILD
 LDFLAGS += -no-pie
 
+# Host mbedTLS (libmbedtls-dev) for the wss:// transport
+MBEDTLS_LIBS := -lmbedtls -lmbedx509 -lmbedcrypto
+
 # Coverage flags (optional)
 ifdef COVERAGE
 CXXFLAGS += --coverage
@@ -26,6 +29,7 @@ TEST_SOURCES := \
 	log_tests.cpp \
 	socket_tests.cpp \
 	tcp_client_tests.cpp \
+	wss_client_tests.cpp \
 	connection_state_tests.cpp \
 	reconnect_tests.cpp \
 	client_tests.cpp \
@@ -56,6 +60,7 @@ IMPL_SOURCES := \
 	../sysmodule/source/debug/log.cpp \
 	../sysmodule/source/network/socket.cpp \
 	../sysmodule/source/network/tcp_client.cpp \
+	../sysmodule/source/network/wss_client.cpp \
 	../sysmodule/source/network/connection_state.cpp \
 	../sysmodule/source/network/reconnect.cpp \
 	../sysmodule/source/network/client.cpp
@@ -70,6 +75,7 @@ TARGET_CONFIG_MANAGER := run_config_manager_tests
 TARGET_LOG := run_log_tests
 TARGET_SOCKET := run_socket_tests
 TARGET_TCP_CLIENT := run_tcp_client_tests
+TARGET_WSS_CLIENT := run_wss_client_tests
 TARGET_CONNECTION_STATE := run_connection_state_tests
 TARGET_RECONNECT := run_reconnect_tests
 TARGET_CLIENT := run_client_tests
@@ -97,9 +103,9 @@ TARGET_ALL := run_all_tests
 #---------------------------------------------------------------------------------
 # Build rules
 #---------------------------------------------------------------------------------
-.PHONY: all clean test test-protocol test-config test-config-manager test-log test-socket test-tcp-client test-connection-state test-reconnect test-client test-ldn-types test-ldn-state-machine test-ldn-proxy test-ldn-error test-ldn-integration test-overlay test-ipc-config test-config-ipc-service test-shared-state test-packet-dispatcher test-session-handler test-proxy-handler test-handler-integration test-upnp test-p2p-proxy test-p2p-client test-p2p-integration test-p2p-create-network test-bsd-mitm-filter coverage coverage-enforce coverage-full-enforce
+.PHONY: all clean test test-protocol test-config test-config-manager test-log test-socket test-tcp-client test-wss-client test-connection-state test-reconnect test-client test-ldn-types test-ldn-state-machine test-ldn-proxy test-ldn-error test-ldn-integration test-overlay test-ipc-config test-config-ipc-service test-shared-state test-packet-dispatcher test-session-handler test-proxy-handler test-handler-integration test-upnp test-p2p-proxy test-p2p-client test-p2p-integration test-p2p-create-network test-bsd-mitm-filter coverage coverage-enforce coverage-full-enforce
 
-all: $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_BSD_MITM_FILTER)
+all: $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_WSS_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_BSD_MITM_FILTER)
 
 # Protocol tests (header-only, no impl needed)
 $(TARGET_PROTOCOL): protocol_tests.o
@@ -125,6 +131,10 @@ $(TARGET_SOCKET): socket_tests.o socket.o log.o config.o
 $(TARGET_TCP_CLIENT): tcp_client_tests.o tcp_client.o socket.o log.o config.o
 	$(CXX) $(LDFLAGS) -o $@ $^
 
+# WssClient tests (needs mbedTLS and the certificates generated below)
+$(TARGET_WSS_CLIENT): wss_client_tests.o wss_client.o tcp_client.o socket.o log.o config.o | wss_certs
+	$(CXX) $(LDFLAGS) -o $@ $^ $(MBEDTLS_LIBS) -lpthread
+
 # Connection State tests (needs connection_state.cpp)
 $(TARGET_CONNECTION_STATE): connection_state_tests.o connection_state.o log.o config.o
 	$(CXX) $(LDFLAGS) -o $@ $^
@@ -134,8 +144,8 @@ $(TARGET_RECONNECT): reconnect_tests.o reconnect.o
 	$(CXX) $(LDFLAGS) -o $@ $^
 
 # Client tests (needs all network modules and log.cpp for logging)
-$(TARGET_CLIENT): client_tests.o client.o tcp_client.o socket.o connection_state.o reconnect.o config.o log.o
-	$(CXX) $(LDFLAGS) -o $@ $^
+$(TARGET_CLIENT): client_tests.o client.o tcp_client.o wss_client.o socket.o connection_state.o reconnect.o config.o log.o
+	$(CXX) $(LDFLAGS) -o $@ $^ $(MBEDTLS_LIBS)
 
 # LDN Types tests (header-only, no impl needed)
 $(TARGET_LDN_TYPES): ldn_types_tests.o
@@ -233,6 +243,24 @@ socket.o: ../sysmodule/source/network/socket.cpp
 tcp_client.o: ../sysmodule/source/network/tcp_client.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
+wss_client.o: ../sysmodule/source/network/wss_client.cpp
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+# Test PKI for the WssClient suite: ca.pem signs a localhost certificate,
+# other_ca.pem is an unrelated CA for the bad-certificate test.
+wss_certs:
+	mkdir -p $@.tmp
+	printf 'subjectAltName=DNS:localhost\n' > $@.tmp/san.ext
+	openssl ecparam -name prime256v1 -genkey -noout -out $@.tmp/ca.key
+	openssl req -x509 -new -key $@.tmp/ca.key -sha256 -days 3650 -subj /CN=ryu_ldn_nx-test-ca -out $@.tmp/ca.pem
+	openssl ecparam -name prime256v1 -genkey -noout -out $@.tmp/other_ca.key
+	openssl req -x509 -new -key $@.tmp/other_ca.key -sha256 -days 3650 -subj /CN=ryu_ldn_nx-other-ca -out $@.tmp/other_ca.pem
+	openssl ecparam -name prime256v1 -genkey -noout -out $@.tmp/server.key
+	openssl req -new -key $@.tmp/server.key -subj /CN=localhost -out $@.tmp/server.csr
+	openssl x509 -req -in $@.tmp/server.csr -CA $@.tmp/ca.pem -CAkey $@.tmp/ca.key -CAcreateserial \
+		-sha256 -days 3650 -extfile $@.tmp/san.ext -out $@.tmp/server.pem
+	mv $@.tmp $@
+
 connection_state.o: ../sysmodule/source/network/connection_state.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
@@ -252,7 +280,7 @@ ldn_proxy_handler.o: ../sysmodule/source/ldn/ldn_proxy_handler.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # Run all tests
-test: $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_P2P_CREATE_NETWORK) $(TARGET_BSD_MITM_FILTER)
+test: $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_WSS_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_P2P_CREATE_NETWORK) $(TARGET_BSD_MITM_FILTER)
 	@echo "=== Running Protocol Tests ==="
 	./$(TARGET_PROTOCOL)
 	@echo ""
@@ -270,6 +298,9 @@ test: $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG)
 	@echo ""
 	@echo "=== Running TcpClient Tests ==="
 	./$(TARGET_TCP_CLIENT)
+	@echo ""
+	@echo "=== Running WssClient Tests ==="
+	./$(TARGET_WSS_CLIENT)
 	@echo ""
 	@echo "=== Running Connection State Tests ==="
 	./$(TARGET_CONNECTION_STATE)
@@ -354,6 +385,9 @@ test-socket: $(TARGET_SOCKET)
 
 test-tcp-client: $(TARGET_TCP_CLIENT)
 	./$(TARGET_TCP_CLIENT)
+
+test-wss-client: $(TARGET_WSS_CLIENT)
+	./$(TARGET_WSS_CLIENT)
 
 test-connection-state: $(TARGET_CONNECTION_STATE)
 	./$(TARGET_CONNECTION_STATE)
@@ -489,8 +523,9 @@ coverage-full-enforce: clean
 	cd .. && python3 scripts/check-coverage.py --min $(MIN_COVERAGE) --root .
 
 clean:
-	rm -f *.o $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_P2P_CREATE_NETWORK) $(TARGET_BSD_MITM_FILTER)
+	rm -f *.o $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_WSS_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_P2P_CREATE_NETWORK) $(TARGET_BSD_MITM_FILTER)
 	rm -f *.gcno *.gcda *.gcov
+	rm -rf wss_certs wss_certs.tmp
 
 #---------------------------------------------------------------------------------
 # Dependencies
@@ -539,6 +574,15 @@ tcp_client.o: ../sysmodule/source/network/tcp_client.cpp \
 	../sysmodule/source/network/socket.hpp \
 	../sysmodule/source/protocol/ryu_protocol.hpp \
 	../sysmodule/source/protocol/packet_buffer.hpp
+
+wss_client_tests.o: wss_client_tests.cpp \
+	../sysmodule/source/network/wss_client.hpp \
+	../sysmodule/source/network/tcp_client.hpp
+
+wss_client.o: ../sysmodule/source/network/wss_client.cpp \
+	../sysmodule/source/network/wss_client.hpp \
+	../sysmodule/source/network/tcp_client.hpp \
+	../sysmodule/source/config/config.hpp
 
 connection_state_tests.o: connection_state_tests.cpp \
 	../sysmodule/source/network/connection_state.hpp
