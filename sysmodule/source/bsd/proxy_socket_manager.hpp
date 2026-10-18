@@ -74,9 +74,11 @@ namespace ams::mitm::bsd {
 /**
  * @brief Maximum number of concurrent proxy sockets
  *
- * Limits memory usage. Games typically don't need many sockets for LDN.
+ * Each proxy socket takes ~16.5 KB of the 384 KB sysmodule heap, so this
+ * caps proxies at about a third of it. PIA opens a handful of sockets; the
+ * next one past the cap fails with ENOMEM.
  */
-constexpr size_t MAX_PROXY_SOCKETS = 64;
+constexpr size_t MAX_PROXY_SOCKETS = 8;
 
 /**
  * @brief Invalid file descriptor sentinel
@@ -127,52 +129,53 @@ public:
      * Called when we detect that a socket should be proxied (LDN address
      * in Bind or Connect).
      *
-     * @param fd File descriptor from the real BSD service
+     * @param key Socket key (session and fd, see ryu_ldn::bsd::SocketKey)
      * @param type Socket type (Stream or Dgram)
      * @param protocol Protocol type (Tcp or Udp)
-     * @return Pointer to the created ProxySocket, or nullptr if failed
+     * @return The proxy socket (the existing one if fd already has one),
+     *         or nullptr if the limit is reached
      *
      * @note Thread-safe
-     * @note Returns nullptr if fd already has a proxy socket
      */
-    /// @gdb{tag="BSD:SOCKET", msg="CreateProxySocket: fd=%d type=%d protocol=%d", args="$x1, $x2, $x3"}
-    ProxySocket* CreateProxySocket(s32 fd, ryu_ldn::bsd::SocketType type, ryu_ldn::bsd::ProtocolType protocol);
+    /// @gdb{tag="BSD:SOCKET", msg="CreateProxySocket: key=0x%lx type=%d protocol=%d", args="$x1, $x2, $x3"}
+    std::shared_ptr<ProxySocket> CreateProxySocket(u64 key, ryu_ldn::bsd::SocketType type, ryu_ldn::bsd::ProtocolType protocol);
 
     /**
      * @brief Get the proxy socket for a file descriptor
      *
-     * @param fd File descriptor to look up
-     * @return Pointer to the ProxySocket, or nullptr if not a proxy socket
+     * @param key Socket key to look up
+     * @return The ProxySocket, or nullptr if not a proxy socket
      *
      * @note Thread-safe
-     * @note The returned pointer is valid as long as the socket is not closed
+     * @note The returned reference keeps the socket alive after a concurrent
+     *       Close/Reset; the socket is then in the Closed state.
      */
-    /// @gdb{tag="BSD:SOCKET", msg="GetProxySocket: fd=%d", args="$x1"}
-    ProxySocket* GetProxySocket(s32 fd);
+    /// @gdb{tag="BSD:SOCKET", msg="GetProxySocket: key=0x%lx", args="$x1"}
+    std::shared_ptr<ProxySocket> GetProxySocket(u64 key);
 
     /**
      * @brief Check if a file descriptor has an associated proxy socket
      *
-     * @param fd File descriptor to check
+     * @param key Socket key to check
      * @return true if fd is a proxy socket, false otherwise
      *
      * @note Thread-safe
      */
-    bool IsProxySocket(s32 fd) const;
+    bool IsProxySocket(u64 key) const;
 
     /**
      * @brief Close and remove a proxy socket
      *
      * Called when the game closes the socket.
      *
-     * @param fd File descriptor to close
+     * @param key Socket key to close
      * @return true if a proxy socket was closed, false if not found
      *
      * @note Thread-safe
      * @note Also releases any allocated ephemeral port
      */
-    /// @gdb{tag="BSD:SOCKET", msg="CloseProxySocket: fd=%d", args="$x1"}
-    bool CloseProxySocket(s32 fd);
+    /// @gdb{tag="BSD:SOCKET", msg="CloseProxySocket: key=0x%lx", args="$x1"}
+    bool CloseProxySocket(u64 key);
 
     /**
      * @brief Close all proxy sockets
@@ -545,19 +548,6 @@ private:
     ~ProxySocketManager() = default;
 
     /**
-     * @brief Find a socket matching the given destination (first match)
-     *
-     * @param dest_ip Destination IP (host byte order)
-     * @param dest_port Destination port (host byte order)
-     * @param protocol Protocol type
-     * @return Pointer to matching socket, or nullptr if not found
-     *
-     * @note Caller must hold m_mutex
-     */
-    ProxySocket* FindSocketByDestination(uint32_t dest_ip, uint16_t dest_port,
-                                          ryu_ldn::bsd::ProtocolType protocol);
-
-    /**
      * @brief Find all sockets matching the given destination
      *
      * For broadcast/multicast packets, multiple sockets may match.
@@ -584,7 +574,7 @@ private:
     /**
      * @brief Map of file descriptor to ProxySocket
      */
-    std::unordered_map<s32, std::unique_ptr<ProxySocket>> m_sockets;
+    std::unordered_map<u64, std::shared_ptr<ProxySocket>> m_sockets;
 
     /**
      * @brief Ephemeral port pool
@@ -620,25 +610,18 @@ private:
     // Packet Buffering (for packets arriving before socket bind)
     // =========================================================================
 
-    static constexpr size_t MaxPendingPackets = 16;
-    static constexpr size_t PendingPayloadMax = 1400;
-
-    struct PendingPacket {
+    struct PendingHeader {
         uint32_t source_ip;
-        uint16_t source_port;
         uint32_t dest_ip;
+        uint16_t source_port;
         uint16_t dest_port;
-        uint16_t len;
         ryu_ldn::bsd::ProtocolType protocol;
-        uint8_t data[PendingPayloadMax];
     };
 
-    // Fixed-size ring buffer — same rationale as ProxySocket's rx ring:
-    // no heap allocation per arriving packet.
-    PendingPacket m_pending_ring[MaxPendingPackets];
-    size_t m_pending_head = 0;
-    size_t m_pending_tail = 0;
-    size_t m_pending_count = 0;
+    // Datagrams for a port nobody has bound yet, oldest dropped when full.
+    // No heap allocation per arriving packet.
+    static constexpr size_t PendingBufferSize = 8 * 1024;
+    PacketRing<PendingHeader, PendingBufferSize> m_pending;
 };
 
 } // namespace ams::mitm::bsd

@@ -27,14 +27,14 @@ ProxySocketManager& ProxySocketManager::GetInstance() {
 // Socket Management
 // =============================================================================
 
-ProxySocket* ProxySocketManager::CreateProxySocket(s32 fd, ryu_ldn::bsd::SocketType type,
-                                                    ryu_ldn::bsd::ProtocolType protocol) {
+std::shared_ptr<ProxySocket> ProxySocketManager::CreateProxySocket(u64 key, ryu_ldn::bsd::SocketType type,
+                                                                    ryu_ldn::bsd::ProtocolType protocol) {
     std::scoped_lock lock(m_mutex);
 
-    // Check if fd already has a proxy socket
-    if (m_sockets.find(fd) != m_sockets.end()) {
-        // Already exists - return existing
-        return m_sockets[fd].get();
+    // Already exists - return existing
+    auto it = m_sockets.find(key);
+    if (it != m_sockets.end()) {
+        return it->second;
     }
 
     // Check limit
@@ -42,103 +42,85 @@ ProxySocket* ProxySocketManager::CreateProxySocket(s32 fd, ryu_ldn::bsd::SocketT
         return nullptr;
     }
 
-    // Create new proxy socket
-    auto socket = std::make_unique<ProxySocket>(type, protocol);
-    ProxySocket* result = socket.get();
-
-    // Add to registry
-    m_sockets[fd] = std::move(socket);
-
-    return result;
+    // nothrow: a failed allocation becomes ENOMEM for the game, not a
+    // constructor running at address 0.
+    ProxySocket* raw = new (std::nothrow) ProxySocket(type, protocol);
+    if (raw == nullptr) {
+        LOG_WARN("ProxySocketManager: out of memory creating proxy for key=0x%lx", static_cast<unsigned long>(key));
+        return nullptr;
+    }
+    std::shared_ptr<ProxySocket> socket(raw);
+    m_sockets[key] = socket;
+    return socket;
 }
 
-ProxySocket* ProxySocketManager::GetProxySocket(s32 fd) {
+std::shared_ptr<ProxySocket> ProxySocketManager::GetProxySocket(u64 key) {
     std::scoped_lock lock(m_mutex);
 
-    auto it = m_sockets.find(fd);
+    auto it = m_sockets.find(key);
     if (it != m_sockets.end()) {
-        return it->second.get();
+        return it->second;
     }
 
     return nullptr;
 }
 
-bool ProxySocketManager::IsProxySocket(s32 fd) const {
+bool ProxySocketManager::IsProxySocket(u64 key) const {
     std::scoped_lock lock(m_mutex);
-    return m_sockets.find(fd) != m_sockets.end();
+    return m_sockets.find(key) != m_sockets.end();
 }
 
-bool ProxySocketManager::CloseProxySocket(s32 fd) {
-    std::scoped_lock lock(m_mutex);
+// Sockets are taken out of the registry under m_mutex and closed after it is
+// released: Close() wakes waiters and, for TCP, calls SendProxyDisconnect,
+// which takes m_mutex itself. Handlers still holding a reference keep the
+// object alive and see it Closed.
 
-    auto it = m_sockets.find(fd);
-    if (it == m_sockets.end()) {
-        return false;
+bool ProxySocketManager::CloseProxySocket(u64 key) {
+    std::shared_ptr<ProxySocket> socket;
+    {
+        std::scoped_lock lock(m_mutex);
+
+        auto it = m_sockets.find(key);
+        if (it == m_sockets.end()) {
+            return false;
+        }
+        socket = std::move(it->second);
+        m_sockets.erase(it);
+
+        if (socket != nullptr && socket->GetLocalAddr().GetPort() != 0) {
+            m_port_pool.ReleasePort(socket->GetLocalAddr().GetPort(), socket->GetProtocol());
+        }
     }
 
-    // Get socket info before closing
-    ProxySocket* socket = it->second.get();
     if (socket != nullptr) {
-        // Release the port
-        const auto& local_addr = socket->GetLocalAddr();
-        if (local_addr.GetPort() != 0) {
-            m_port_pool.ReleasePort(local_addr.GetPort(), socket->GetProtocol());
-        }
-
-        // Close the socket
-        Result close_result = socket->Close();
-        if (R_FAILED(close_result)) {
-            // Log but continue cleanup - socket will be destroyed regardless
-            AMS_UNUSED(close_result);
-        }
+        static_cast<void>(socket->Close());
     }
-
-    // Remove from registry
-    m_sockets.erase(it);
-
     return true;
 }
 
 void ProxySocketManager::CloseAllProxySockets() {
-    std::scoped_lock lock(m_mutex);
-
-    // Close all sockets
-    for (auto& [fd, socket] : m_sockets) {
-        if (socket != nullptr) {
-            Result close_result = socket->Close();
-            if (R_FAILED(close_result)) {
-                // Log but continue cleanup - socket will be destroyed regardless
-                AMS_UNUSED(close_result);
-            }
-        }
+    decltype(m_sockets) closing;
+    {
+        std::scoped_lock lock(m_mutex);
+        closing.swap(m_sockets);
+        m_port_pool.ReleaseAll();
     }
 
-    // Clear registry
-    m_sockets.clear();
-
-    // Release all ports
-    m_port_pool.ReleaseAll();
+    for (auto& [fd, socket] : closing) {
+        if (socket != nullptr) {
+            static_cast<void>(socket->Close());
+        }
+    }
 }
 
 void ProxySocketManager::Reset() {
+    // Close first, while the disconnect callback is still set.
+    CloseAllProxySockets();
+
     std::scoped_lock lock(m_mutex);
 
-    // Close all proxy sockets
-    for (auto& [fd, socket] : m_sockets) {
-        if (socket != nullptr) {
-            Result close_result = socket->Close();
-            AMS_UNUSED(close_result);
-        }
-    }
-    m_sockets.clear();
-
-    // Release all ports
-    m_port_pool.ReleaseAll();
-
     // Clear pending packets ring (no dealloc — just reset indices)
-    m_pending_head = 0;
-    m_pending_tail = 0;
-    m_pending_count = 0;
+    m_pending.Clear();
 
     // Reset local IP
     m_local_ip = 0;
@@ -294,47 +276,40 @@ bool ProxySocketManager::RouteConnectResponse(const ryu_ldn::protocol::ProxyConn
 }
 
 bool ProxySocketManager::RouteConnectRequest(const ryu_ldn::protocol::ProxyConnectRequest& request) {
-    std::scoped_lock lock(m_mutex);
-
     // Find listening socket that matches the destination
     uint32_t dest_ip = request.info.dest_ipv4;
     uint16_t dest_port = request.info.dest_port;
 
-    for (auto& [fd, socket] : m_sockets) {
-        if (socket == nullptr) {
-            continue;
+    std::shared_ptr<ProxySocket> listener;
+    {
+        std::scoped_lock lock(m_mutex);
+
+        for (auto& [fd, socket] : m_sockets) {
+            if (socket == nullptr ||
+                socket->GetState() != ProxySocketState::Listening ||
+                socket->GetProtocol() != ryu_ldn::bsd::ProtocolType::Tcp) {
+                continue;
+            }
+
+            // Port must match; IP can be exact match or INADDR_ANY
+            const auto& local_addr = socket->GetLocalAddr();
+            const uint32_t local_ip = local_addr.GetAddr();
+            if (local_addr.GetPort() != dest_port || (local_ip != 0 && local_ip != dest_ip)) {
+                continue;
+            }
+
+            listener = socket;
+            break;
         }
-
-        // Check if socket is listening
-        if (socket->GetState() != ProxySocketState::Listening) {
-            continue;
-        }
-
-        // Check protocol matches (TCP)
-        if (socket->GetProtocol() != ryu_ldn::bsd::ProtocolType::Tcp) {
-            continue;
-        }
-
-        // Check local address matches destination
-        const auto& local_addr = socket->GetLocalAddr();
-
-        // Port must match
-        if (local_addr.GetPort() != dest_port) {
-            continue;
-        }
-
-        // IP can be exact match or INADDR_ANY
-        uint32_t local_ip = local_addr.GetAddr();
-        if (local_ip != 0 && local_ip != dest_ip) {
-            continue;
-        }
-
-        // Found matching listener - queue the connection
-        socket->IncomingConnection(request);
-        return true;
     }
 
-    return false;
+    if (listener == nullptr) {
+        return false;
+    }
+
+    // Outside m_mutex: IncomingConnection replies through SendProxyConnectReply.
+    listener->IncomingConnection(request);
+    return true;
 }
 
 // =============================================================================
@@ -356,25 +331,11 @@ bool ProxySocketManager::RouteIncomingData(uint32_t source_ip, uint16_t source_p
                                                       targets, kMaxSockets);
 
     if (match_count == 0) {
-        // No matching socket — buffer into fixed-size ring for post-bind delivery.
-        if (m_pending_count >= MaxPendingPackets) {
-            // Drop oldest
-            m_pending_head = (m_pending_head + 1) % MaxPendingPackets;
-            m_pending_count--;
+        // No matching socket — buffer for post-bind delivery. Oversize
+        // datagrams are dropped, never stored cut short.
+        if (data_len <= PROXY_SOCKET_MAX_PAYLOAD && (data != nullptr || data_len == 0)) {
+            m_pending.Push(PendingHeader{source_ip, dest_ip, source_port, dest_port, protocol}, data, data_len);
         }
-        PendingPacket& slot = m_pending_ring[m_pending_tail];
-        slot.source_ip = source_ip;
-        slot.source_port = source_port;
-        slot.dest_ip = dest_ip;
-        slot.dest_port = dest_port;
-        slot.protocol = protocol;
-        size_t copy_len = std::min(data_len, static_cast<size_t>(PendingPayloadMax));
-        slot.len = static_cast<uint16_t>(copy_len);
-        if (copy_len > 0 && data != nullptr) {
-            std::memcpy(slot.data, data, copy_len);
-        }
-        m_pending_tail = (m_pending_tail + 1) % MaxPendingPackets;
-        m_pending_count++;
         return false;
     }
 
@@ -401,71 +362,6 @@ bool ProxySocketManager::RouteIncomingData(uint32_t source_ip, uint16_t source_p
     }
 
     return true;
-}
-
-ProxySocket* ProxySocketManager::FindSocketByDestination(uint32_t dest_ip, uint16_t dest_port,
-                                                          ryu_ldn::bsd::ProtocolType protocol) {
-    // Caller must hold m_mutex
-
-    // Check if dest_ip is a broadcast address (ends in .255 or .255.255)
-    // LDN subnet is 10.114.x.x with mask 255.255.0.0, so broadcast is 10.114.255.255
-    // CRITICAL: dest_ip is in Ryujinx format (Big Endian read as uint32)
-    // For 10.114.255.255: first octet (10) in HIGH byte, last octet (255) in LOW byte
-    // So 10.114.255.255 = 0x0A72FFFF where:
-    //   - 0x0A = 10 (first octet, bits 24-31)
-    //   - 0x72 = 114 (second octet, bits 16-23)
-    //   - 0xFF = 255 (third octet, bits 8-15)
-    //   - 0xFF = 255 (fourth octet, bits 0-7)
-    // To check .255 (last octet): mask 0x000000FF
-    // To check .255.255 (last two octets): mask 0x0000FFFF
-    bool is_broadcast = ((dest_ip & 0x000000FF) == 0x000000FF) ||   // x.x.x.255 in Ryujinx format
-                        ((dest_ip & 0x0000FFFF) == 0x0000FFFF);     // x.x.255.255 in Ryujinx format
-
-    for (auto& [fd, socket] : m_sockets) {
-        if (socket == nullptr) {
-            continue;
-        }
-
-        // Check protocol matches
-        if (socket->GetProtocol() != protocol) {
-            continue;
-        }
-
-        // Check local address matches destination
-        const auto& local_addr = socket->GetLocalAddr();
-
-        // Port must match (GetPort does bswap16, but dest_port is in host order)
-        if (local_addr.GetPort() != dest_port) {
-            continue;
-        }
-
-        // IP matching:
-        // CRITICAL: sin_addr is now in Ryujinx format (NO bswap was applied in Bind).
-        // Use sin_addr directly instead of GetAddr() which does bswap32.
-        // 1. INADDR_ANY (bound to 0.0.0.0 - accepts any destination)
-        // 2. Exact match (bound to specific IP)
-        // 3. Broadcast: any socket on the same port receives broadcast packets
-        uint32_t local_ip = local_addr.sin_addr;  // Direct access - Ryujinx format
-        if (local_ip == 0) {
-            // Bound to INADDR_ANY - accepts all
-            return socket.get();
-        }
-        if (local_ip == dest_ip) {
-            // Exact match
-            return socket.get();
-        }
-        if (is_broadcast) {
-            // Broadcast packet - deliver to any socket bound on this port
-            // Check if socket is in the same subnet (10.114.x.x)
-            // In Ryujinx format: 0x0A72xxxx where 0x0A72 is the subnet (10.114)
-            // Subnet is in HIGH 16 bits, so mask is 0xFFFF0000
-            if ((local_ip & 0xFFFF0000) == (dest_ip & 0xFFFF0000)) {
-                return socket.get();
-            }
-        }
-    }
-
-    return nullptr;
 }
 
 size_t ProxySocketManager::FindAllSocketsByDestination(uint32_t dest_ip, uint16_t dest_port,
@@ -496,7 +392,7 @@ size_t ProxySocketManager::FindAllSocketsByDestination(uint32_t dest_ip, uint16_
             continue;
         }
 
-        uint32_t local_ip = local_addr.sin_addr;
+        uint32_t local_ip = local_addr.GetAddr();  // Ryujinx format, like dest_ip
 
         if (local_ip == 0) {
             out_sockets[count++] = socket.get();
@@ -554,18 +450,17 @@ void ProxySocketManager::DeliverPendingPackets(ProxySocket* socket, uint16_t por
     // Caller must NOT hold m_mutex (we take it here)
     std::scoped_lock lock(m_mutex);
 
-    if (socket == nullptr || m_pending_count == 0) {
+    if (socket == nullptr) {
         return;
     }
 
-    // Walk the ring in arrival order, delivering matches and compacting in place.
-    size_t read_idx = m_pending_head;
-    size_t write_idx = m_pending_head;
-    size_t remaining = m_pending_count;
-    size_t kept = 0;
-
-    while (remaining > 0) {
-        const PendingPacket& pkt = m_pending_ring[read_idx];
+    // Take each datagram off the front once; deliver matches, re-queue the
+    // rest at the back so their order is kept.
+    uint8_t payload[PROXY_SOCKET_MAX_PAYLOAD];
+    for (size_t n = m_pending.Count(); n > 0; n--) {
+        PendingHeader pkt;
+        const size_t len = m_pending.Front(&pkt, payload, sizeof(payload));
+        m_pending.Pop();
 
         if (pkt.protocol == protocol && pkt.dest_port == port) {
             ryu_ldn::bsd::SockAddrIn from_addr{};
@@ -573,23 +468,11 @@ void ProxySocketManager::DeliverPendingPackets(ProxySocket* socket, uint16_t por
             from_addr.sin_family = static_cast<uint8_t>(ryu_ldn::bsd::AddressFamily::Inet);
             from_addr.sin_port = __builtin_bswap16(pkt.source_port);
             from_addr.sin_addr = __builtin_bswap32(pkt.source_ip);  // Ryujinx -> network byte order
-
-            socket->IncomingData(pkt.data, pkt.len, from_addr);
-            // Drop this slot by not copying it forward
+            socket->IncomingData(payload, len, from_addr);
         } else {
-            if (write_idx != read_idx) {
-                m_pending_ring[write_idx] = pkt;
-            }
-            write_idx = (write_idx + 1) % MaxPendingPackets;
-            kept++;
+            m_pending.Push(pkt, payload, len);
         }
-
-        read_idx = (read_idx + 1) % MaxPendingPackets;
-        remaining--;
     }
-
-    m_pending_tail = write_idx;
-    m_pending_count = kept;
 }
 
 } // namespace ams::mitm::bsd

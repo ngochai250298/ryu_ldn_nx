@@ -122,7 +122,7 @@ namespace ams {
         /// Thread priority for the MITM service
         const s32 ThreadPriority = 6;
 
-        /// Total number of threads for request processing
+        /// ldn:u server threads (main thread + extra)
         const size_t TotalThreads = 2;
         const size_t NumExtraThreads = TotalThreads - 1;
 
@@ -137,11 +137,19 @@ namespace ams {
         alignas(os::MemoryPageSize) u8 g_thread_stack[ThreadStackSize];
         os::ThreadType g_thread;
 
+        /// bsd:u server threads. bsd:u has its own pool so a game parking
+        /// threads in blocking socket calls can never starve ldn:u (and the
+        /// session close that would unblock it). Deepest measured bsd path is
+        /// the proxy send chain into RyuLdnClient (see BsdThreadStackSize).
+        const size_t BsdThreadCount = 3;
+        const size_t BsdThreadStackSize = 0x4000;
+        alignas(os::MemoryPageSize) u8 g_bsd_thread_stacks[BsdThreadCount][BsdThreadStackSize];
+        os::ThreadType g_bsd_threads[BsdThreadCount];
+
         // Heap for dynamic allocations
-        // NOTE: 384KB covers: game whitelist (~40KB), proxy socket receive queues
-        // (up to ~45KB under lobby traffic with 900+ byte packets), pending-packet
-        // buffer, ExpHeap overhead/fragmentation, and transient std::vector/std::deque
-        // allocations. 96KB saturated under real gameplay traffic and caused DABRT
+        // NOTE: 384KB covers: game whitelist (~40KB), proxy sockets (~16.5KB each,
+        // at most MAX_PROXY_SOCKETS = 8), ExpHeap overhead/fragmentation, and
+        // transient std::vector/std::deque allocations. 96KB saturated under real gameplay traffic and caused DABRT
         // 0x101 on allocation failure.
         alignas(0x40) constinit u8 g_heap_memory[384_KB];
         constinit lmem::HeapHandle g_heap_handle;
@@ -184,73 +192,39 @@ namespace ams {
                 static constexpr bool   CanManageMitmServers  = true;
             };
 
-            /// Maximum concurrent sessions
-            /// Higher value needed when intercepting all applications for BSD MITM
-            constexpr size_t MaxSessions = 16;
+            /// Maximum concurrent sessions per service. A game holds about
+            /// three ldn:u sessions (service, communication object, process
+            /// monitor) and several bsd:u sessions (one per pooled client).
+            constexpr size_t LdnMaxSessions = 6;
+            constexpr size_t BsdMaxSessions = 14;
 
-            /// Port indices for MITM services
-            constexpr int PortIndex_LdnMitm = 0;
-            constexpr int PortIndex_BsdMitm = 1;
-
-            /// Custom server manager for MITM (2 ports: ldn:u and bsd:u)
-            class ServerManager final : public sf::hipc::ServerManager<2, LdnMitmManagerOptions, MaxSessions> {
+            /// One single-port MITM server manager per service, so each
+            /// service gets its own threads.
+            template<typename Interface, typename Impl, size_t MaxSessions>
+            class MitmServerManager final : public sf::hipc::ServerManager<1, LdnMitmManagerOptions, MaxSessions> {
             private:
-                virtual ams::Result OnNeedsToAccept(int port_index, Server* server) override;
+                using Base = sf::hipc::ServerManager<1, LdnMitmManagerOptions, MaxSessions>;
+
+                virtual ams::Result OnNeedsToAccept(int port_index, typename Base::Server* server) override {
+                    AMS_UNUSED(port_index);
+
+                    std::shared_ptr<::Service> fsrv;
+                    sm::MitmProcessInfo client_info;
+                    server->AcknowledgeMitmSession(std::addressof(fsrv), std::addressof(client_info));
+
+                    LOG_INFO("OnNeedsToAccept: pid=%lu, program_id=0x%016lx, fsrv handle=0x%x",
+                             client_info.process_id.value, client_info.program_id.value, fsrv ? fsrv->session : 0);
+
+                    R_RETURN(this->AcceptMitmImpl(
+                        server, sf::CreateSharedObjectEmplaced<Interface, Impl>(decltype(fsrv)(fsrv), client_info), fsrv));
+                }
             };
 
-            ServerManager g_server_manager;
+            MitmServerManager<mitm::ldn::ILdnMitMService, mitm::ldn::LdnMitMService, LdnMaxSessions> g_server_manager;
+            MitmServerManager<mitm::bsd::IBsdMitmService, mitm::bsd::BsdMitmService, BsdMaxSessions> g_bsd_server_manager;
 
-            // Global counters for session tracking
-            static u32 g_ldn_session_counter = 0;
-            static u32 g_bsd_session_counter = 0;
-
-            Result ServerManager::OnNeedsToAccept(int port_index, Server* server) {
-                LOG_INFO("OnNeedsToAccept: port_index=%d, server=%p", port_index, server);
-
-                // Acknowledge the MITM session
-                std::shared_ptr<::Service> fsrv;
-                sm::MitmProcessInfo client_info;
-                server->AcknowledgeMitmSession(std::addressof(fsrv), std::addressof(client_info));
-
-                LOG_INFO("OnNeedsToAccept: Acknowledged session for pid=%lu, program_id=0x%016lx, fsrv=%p (handle=0x%x)",
-                         client_info.process_id.value, client_info.program_id.value,
-                         fsrv.get(), fsrv ? fsrv->session : 0);
-
-                Result rc;
-                switch (port_index) {
-                    case PortIndex_LdnMitm:
-                        {
-                            u32 session_id = ++g_ldn_session_counter;
-                            LOG_INFO("LDN MITM: Creating session #%u for pid=%lu", session_id, client_info.process_id.value);
-                            // LDN MITM service (ldn:u)
-                            rc = this->AcceptMitmImpl(
-                                server,
-                                sf::CreateSharedObjectEmplaced<
-                                    mitm::ldn::ILdnMitMService,
-                                    mitm::ldn::LdnMitMService>(decltype(fsrv)(fsrv), client_info),
-                                fsrv);
-                            LOG_INFO("LDN AcceptMitmImpl result: 0x%x (session #%u)", rc.GetValue(), session_id);
-                        }
-                        return rc;
-
-                    case PortIndex_BsdMitm:
-                        {
-                            u32 session_id = ++g_bsd_session_counter;
-                            LOG_INFO("BSD MITM: Creating session #%u for pid=%lu", session_id, client_info.process_id.value);
-                            // BSD MITM service (bsd:u)
-                            rc = this->AcceptMitmImpl(
-                                server,
-                                sf::CreateSharedObjectEmplaced<
-                                    mitm::bsd::IBsdMitmService,
-                                    mitm::bsd::BsdMitmService>(decltype(fsrv)(fsrv), client_info),
-                                fsrv);
-                            LOG_INFO("BSD AcceptMitmImpl result: 0x%x (session #%u)", rc.GetValue(), session_id);
-                        }
-                        return rc;
-
-                    default:
-                        AMS_ABORT("Unknown port index");
-                }
+            void LoopBsdServerThread(void*) {
+                g_bsd_server_manager.LoopProcess();
             }
 
             // Extra threads for parallel request handling
@@ -479,16 +453,29 @@ namespace ams {
         LOG_INFO("Registering ldn:u MITM service");
         constexpr sm::ServiceName LdnMitmServiceName = sm::ServiceName::Encode("ldn:u");
         R_ABORT_UNLESS((mitm::g_server_manager.RegisterMitmServer<
-            mitm::ldn::LdnMitMService>(mitm::PortIndex_LdnMitm, LdnMitmServiceName)));
+            mitm::ldn::LdnMitMService>(0, LdnMitmServiceName)));
         LOG_INFO("ldn:u MITM service registered successfully");
 
         // Register bsd:u MITM service (port 1)
         // This allows us to intercept game sockets that target LDN addresses (10.114.x.x)
         LOG_INFO("Registering bsd:u MITM service");
         constexpr sm::ServiceName BsdMitmServiceName = sm::ServiceName::Encode("bsd:u");
-        R_ABORT_UNLESS((mitm::g_server_manager.RegisterMitmServer<
-            mitm::bsd::BsdMitmService>(mitm::PortIndex_BsdMitm, BsdMitmServiceName)));
+        R_ABORT_UNLESS((mitm::g_bsd_server_manager.RegisterMitmServer<
+            mitm::bsd::BsdMitmService>(0, BsdMitmServiceName)));
         LOG_INFO("bsd:u MITM service registered successfully");
+
+        // bsd:u server threads
+        for (size_t i = 0; i < mitm::BsdThreadCount; i++) {
+            R_ABORT_UNLESS(os::CreateThread(
+                &mitm::g_bsd_threads[i],
+                mitm::LoopBsdServerThread,
+                nullptr,
+                mitm::g_bsd_thread_stacks[i],
+                mitm::BsdThreadStackSize,
+                mitm::ThreadPriority));
+            os::SetThreadNamePointer(&mitm::g_bsd_threads[i], "ryu_ldn::BsdThread");
+            os::StartThread(&mitm::g_bsd_threads[i]);
+        }
 
 
 

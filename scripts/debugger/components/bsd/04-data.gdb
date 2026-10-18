@@ -5,7 +5,7 @@
 echo [BSD] Loading data breakpoints...\n
 # Namespace: ams::mitm::bsd
 dprintf ams::mitm::bsd::BsdMitmService::Recv, "[BSD:DATA] Recv: fd=%d flags=%d\n", $x3, $x4
-dprintf ams::mitm::bsd::BsdMitmService::RecvFrom, "[BSD:DATA] RecvFrom: fd=%d flags=%d\n", $x3, $x4
+dprintf ams::mitm::bsd::BsdMitmService::RecvFrom, "[BSD:DATA] RecvFrom: fd=%d flags=%d\n", $x4, $x5
 dprintf ams::mitm::bsd::BsdMitmService::Send, "[BSD:DATA] Send: fd=%d flags=%d\n", $x3, $x4
 dprintf ams::mitm::bsd::BsdMitmService::SendTo, "[BSD:DATA] SendTo: fd=%d flags=%d\n", $x3, $x4
 dprintf ams::mitm::bsd::BsdMitmService::Write, "[BSD:DATA] Write: fd=%d\n", $x3

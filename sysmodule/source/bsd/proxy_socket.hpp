@@ -25,8 +25,9 @@
  *
  * ## Thread Safety
  *
- * The receive queue is protected by a mutex. The receive event can be used
- * to block until data is available (for blocking Recv calls).
+ * The receive queue is protected by a mutex. Blocking Recv/Accept wait on
+ * the receive/accept event for at most PROXY_SOCKET_MAX_BLOCK_MS, and
+ * Close/Shutdown signal the events so any waiter returns at once.
  *
  * ## Lifecycle
  *
@@ -43,9 +44,11 @@
 #pragma once
 
 #include <stratosphere.hpp>
+#include <atomic>
 #include <deque>
 #include <vector>
 #include "bsd_types.hpp"
+#include "packet_ring.hpp"
 #include "../protocol/types.hpp"
 
 namespace ams::mitm::bsd {
@@ -54,12 +57,14 @@ namespace ams::mitm::bsd {
 class ProxySocketManager;
 
 /**
- * @brief Maximum size of the receive queue per socket
+ * @brief Receive buffer per proxy socket, in bytes
  *
- * Limits memory usage per socket. If the queue is full, oldest
- * packets are dropped (UDP behavior).
+ * Datagrams are stored back to back (see PacketRing), so this holds about
+ * eleven 1460-byte MK8DX frames or well over a hundred small PIA packets.
+ * When it is full the oldest datagrams are dropped (UDP behaviour). Each
+ * ProxySocket is heap-allocated, so this sets most of its ~16.5 KB.
  */
-constexpr size_t PROXY_SOCKET_MAX_QUEUE_SIZE = 32;
+constexpr size_t PROXY_SOCKET_RX_BUFFER_SIZE = 16 * 1024;
 
 /**
  * @brief Maximum payload size for a single ProxyData packet
@@ -72,6 +77,32 @@ constexpr size_t PROXY_SOCKET_MAX_QUEUE_SIZE = 32;
 constexpr size_t PROXY_SOCKET_MAX_PAYLOAD = 2000;
 
 /**
+ * @brief Longest a blocking Recv/Accept holds a bsd:u server thread
+ *
+ * A blocking call with nothing queued waits at most this long (or the
+ * socket's SO_RCVTIMEO, if shorter) and then fails with EAGAIN, as a real
+ * socket does when its receive timeout expires.
+ *
+ * ponytail: bounded wait instead of deferring the IPC reply. Long blocking
+ * reads become a 1 s EAGAIN poll; switch to CanDeferInvokeRequest if a game
+ * is found that treats EAGAIN on a blocking socket as fatal.
+ */
+constexpr s64 PROXY_SOCKET_MAX_BLOCK_MS = 1000;
+
+/**
+ * @brief Wake-up for Poll/Select over proxy sockets
+ *
+ * Bumped whenever any proxy socket gets data or a connection, or is shut
+ * down or closed. A waiter reads the sequence, checks its sockets, then
+ * waits for the sequence to change, so no wake-up is lost in between.
+ * The lock behind it is a leaf: nothing else is taken while it is held.
+ */
+uint64_t ProxyActivitySeq();
+void NotifyProxyActivity();
+/// Waits until ProxyActivitySeq() != seen or timeout passes (may wake early).
+void WaitProxyActivity(uint64_t seen, TimeSpan timeout);
+
+/**
  * @brief State of a proxy socket
  */
 enum class ProxySocketState {
@@ -81,22 +112,6 @@ enum class ProxySocketState {
     Connected,      ///< Socket connected to remote (TCP) or has default dest (UDP)
     Listening,      ///< Socket listening for connections (TCP only)
     Closed,         ///< Socket closed, awaiting cleanup
-};
-
-/**
- * @brief Received packet data with source information
- *
- * Stores a received ProxyData packet along with the source address
- * for RecvFrom() calls. Fixed-size payload buffer so the enclosing
- * ring queue can live inline in ProxySocket with zero heap allocations
- * per packet — LDN traffic on real Switch cannot afford an alloc+free
- * cycle per datagram (100+ pkts/s) on top of the internet round-trip.
- */
-struct ReceivedPacket {
-    ryu_ldn::bsd::SockAddrIn from;                   ///< Source address
-    uint16_t len;                                    ///< Payload length (<= PROXY_SOCKET_MAX_PAYLOAD)
-    uint16_t _pad;                                   ///< Alignment
-    uint8_t data[PROXY_SOCKET_MAX_PAYLOAD];          ///< Payload buffer
 };
 
 /**
@@ -155,12 +170,6 @@ public:
     ProxySocket(const ProxySocket&) = delete;
     ProxySocket& operator=(const ProxySocket&) = delete;
 
-    /**
-     * @brief Move constructor
-     */
-    ProxySocket(ProxySocket&&) = default;
-    ProxySocket& operator=(ProxySocket&&) = default;
-
     // =========================================================================
     // Socket State
     // =========================================================================
@@ -194,6 +203,12 @@ public:
      * @param non_blocking true to enable non-blocking mode
      */
     void SetNonBlocking(bool non_blocking) { m_non_blocking = non_blocking; }
+
+    /**
+     * @brief Set the receive timeout (SO_RCVTIMEO)
+     * @param timeout_ns Timeout in nanoseconds, 0 for none
+     */
+    void SetRecvTimeout(s64 timeout_ns) { m_rcv_timeout_ns = timeout_ns; }
 
     // =========================================================================
     // Address Management
@@ -470,35 +485,9 @@ public:
      */
     size_t GetPendingDataSize() const;
 
-    /**
-     * @brief Wait for data to be available
-     *
-     * Blocks until data is available or timeout expires.
-     *
-     * @param timeout_ms Timeout in milliseconds (0 = infinite)
-     * @return true if data is available, false if timeout
-     */
-    bool WaitForData(u64 timeout_ms);
-
-    /**
-     * @brief Get the receive event handle
-     *
-     * Can be used with poll/select to wait for data.
-     *
-     * @return Reference to the receive event
-     */
-    os::Event& GetReceiveEvent() { return m_receive_event; }
-
 private:
-    /**
-     * @brief Pop the front packet from the receive queue
-     *
-     * @param peek If true, don't remove from queue (MSG_PEEK)
-     * @return The front packet, or empty if queue is empty
-     *
-     * @note Caller must hold m_queue_mutex
-     */
-    ReceivedPacket PopFrontPacket(bool peek);
+    /// How long a blocking call may wait before returning EAGAIN.
+    TimeSpan BlockingWaitLimit() const;
 
     /**
      * @brief Socket type (Stream or Dgram)
@@ -513,18 +502,23 @@ private:
     /**
      * @brief Current socket state
      */
-    ProxySocketState m_state{ProxySocketState::Created};
+    std::atomic<ProxySocketState> m_state{ProxySocketState::Created};
 
     /**
      * @brief Non-blocking mode flag
      */
-    bool m_non_blocking{false};
+    std::atomic<bool> m_non_blocking{false};
+
+    /**
+     * @brief Receive timeout in nanoseconds (SO_RCVTIMEO), 0 for none
+     */
+    std::atomic<s64> m_rcv_timeout_ns{0};
 
     /**
      * @brief Shutdown flags
      */
-    bool m_shutdown_read{false};
-    bool m_shutdown_write{false};
+    std::atomic<bool> m_shutdown_read{false};
+    std::atomic<bool> m_shutdown_write{false};
 
     /**
      * @brief Local address (set by Bind)
@@ -542,14 +536,11 @@ private:
     mutable os::Mutex m_queue_mutex{false};
 
     /**
-     * @brief Receive queue (incoming packets) — fixed-size ring buffer.
+     * @brief Receive queue (incoming datagrams with their source address).
      * Producer: network thread via IncomingData. Consumer: game thread via
      * RecvFrom. Full = drop oldest (UDP behavior). Protected by m_queue_mutex.
      */
-    ReceivedPacket m_rx_ring[PROXY_SOCKET_MAX_QUEUE_SIZE];
-    size_t m_rx_head = 0;                            ///< Read index
-    size_t m_rx_tail = 0;                            ///< Write index
-    size_t m_rx_count = 0;                           ///< Elements in ring
+    PacketRing<ryu_ldn::bsd::SockAddrIn, PROXY_SOCKET_RX_BUFFER_SIZE> m_rx_ring;
 
     /**
      * @brief Event signaled when data is available

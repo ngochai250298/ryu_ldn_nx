@@ -64,9 +64,44 @@ inline bool IsLdnAddress(uint32_t ip) {
 }
 
 /**
- * @brief Maximum number of proxy sockets we can manage
+ * @brief Key of a socket in the MITM's socket tables
+ *
+ * Each registered bsd:u client (one BsdMitmService object, shared by its
+ * clones) has its own fd numbering, so fd alone is ambiguous when a game
+ * holds several clients. The session id is never 0, so no key is a bare fd.
  */
-constexpr size_t MAX_PROXY_SOCKETS = 64;
+constexpr uint64_t SocketKey(uint32_t session_id, int32_t fd) {
+    return (static_cast<uint64_t>(session_id) << 32) | static_cast<uint32_t>(fd);
+}
+
+/**
+ * @brief Whether a datagram to this destination goes through the LDN proxy
+ *
+ * LDN addresses, plus the broadcasts the server understands: the limited
+ * broadcast and the legacy 192.168.0.255 (HostedGame.RouteMessage maps it
+ * to the subnet broadcast). Anything else is internet traffic and goes to
+ * the real socket.
+ *
+ * @param ip IPv4 address in host byte order
+ */
+inline bool IsProxyDestination(uint32_t ip) {
+    return IsLdnAddress(ip) || ip == 0xFFFFFFFF || ip == 0xC0A800FF;
+}
+
+/**
+ * @brief Whether bind() to this address makes the socket a proxy
+ *
+ * 10.114.x.y always does. 0.0.0.0 does only while an LDN session has a
+ * proxy IP, as Ryujinx only creates proxy sockets while its LDN proxy is
+ * registered; otherwise an online game's INADDR_ANY socket would be cut
+ * off from the internet.
+ *
+ * @param ip Bound IPv4 address in host byte order
+ * @param ldn_active True while the LDN session has a local proxy IP
+ */
+inline bool IsProxyBind(uint32_t ip, bool ldn_active) {
+    return IsLdnAddress(ip) || (ip == 0 && ldn_active);
+}
 
 /**
  * @brief Ephemeral port range start (like Linux)
@@ -296,6 +331,7 @@ enum class FileStatusFlags : int32_t {
  * @brief Ioctl requests (whitelisted on Switch)
  */
 enum class IoctlRequest : uint32_t {
+    FioNbio = 0x8004667E,     ///< FIONBIO - set/clear non-blocking (int in)
     FioNread = 0x4004667F,    ///< FIONREAD - bytes available
     SiocAtMark = 0x40047307,  ///< SIOCATMARK - at OOB mark?
 };
@@ -433,5 +469,65 @@ enum class BsdCommand : uint32_t {
     // [15.0.0+]
     RegisterResourceStatisticsName = 32,
 };
+
+
+// =============================================================================
+// Message Flags
+// =============================================================================
+
+constexpr int32_t MSG_FLAG_PEEK = 0x2;       ///< MSG_PEEK
+constexpr int32_t MSG_FLAG_DONTWAIT = 0x80;  ///< MSG_DONTWAIT
+
+/// socket() type flag: the new socket starts non-blocking (FreeBSD SOCK_NONBLOCK)
+constexpr int32_t SOCK_FLAG_NONBLOCK = 0x20000000;
+/// Mask that strips SOCK_NONBLOCK/SOCK_CLOEXEC from a socket() type
+constexpr int32_t SOCK_TYPE_MASK = 0x0FFFFFFF;
+
+/// 64-bit struct timeval, as passed to SO_RCVTIMEO
+struct Timeval {
+    int64_t tv_sec;
+    int64_t tv_usec;
+};
+static_assert(sizeof(Timeval) == 16, "Timeval must be 16 bytes");
+
+/// SO_RCVTIMEO value in nanoseconds; 0 means no timeout.
+constexpr int64_t TimevalToNanoseconds(const Timeval& tv) {
+    const int64_t ns = tv.tv_sec * 1000000000LL + tv.tv_usec * 1000LL;
+    return ns > 0 ? ns : 0;
+}
+
+// =============================================================================
+// IPC Reply Layout
+// =============================================================================
+
+/**
+ * @brief Leading words of every bsd:u reply
+ *
+ * libnx bsd.c `_bsdDispatchImpl` parses every reply as
+ * `struct { int ret; int errno_; }` followed by any extra outputs
+ * (addrlen/optlen), and reads errno_ only when ret < 0.
+ */
+struct BsdReply {
+    int32_t ret;
+    int32_t errno_;
+};
+
+/// Reply for a result that is >= 0 on success or -errno on failure.
+constexpr BsdReply MakeReply(int32_t result) {
+    return result < 0 ? BsdReply{-1, -result} : BsdReply{result, 0};
+}
+
+/**
+ * @brief select() timeout as sent in the request (libnx bsd.c BsdSelectTimeval)
+ *
+ * A 64-bit `struct timeval` followed by an is_null flag; 24 bytes, so it
+ * sits at offset 8 of the request after `int nfds`.
+ */
+struct SelectTimeval {
+    int64_t tv_sec;
+    int64_t tv_usec;
+    bool is_null;
+};
+static_assert(sizeof(SelectTimeval) == 24, "SelectTimeval must be 24 bytes");
 
 } // namespace ryu_ldn::bsd
