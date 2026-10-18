@@ -225,6 +225,13 @@ ICommunicationService::ICommunicationService(ncm::ProgramId program_id, u64 owne
 
     // Configure packet callback to receive server responses
     // Use static callback with user_data to route to instance method
+    //
+    // RULE: both callbacks below run on the receive thread with
+    // RyuLdnClient::m_conn_mutex held (inside update()). They must never call
+    // connect(), disconnect(), update() or set_config() on m_server_client
+    // (self-lock), nor take g_active_service_mutex (its holders call
+    // connect/disconnect). Anything that needs those goes through an event or
+    // flag that an IPC thread acts on (see m_error_event / ConsumeNetworkError).
     m_server_client.set_packet_callback(
         [](ryu_ldn::protocol::PacketId id, const uint8_t* data, size_t size, void* user_data) {
             auto* self = static_cast<ICommunicationService*>(user_data);
