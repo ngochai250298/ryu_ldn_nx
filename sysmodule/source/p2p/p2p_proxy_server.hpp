@@ -103,6 +103,16 @@ public:
     static constexpr int AUTH_WAIT_SECONDS = 1;
     static constexpr int MAX_PLAYERS = 8;
 
+    /// Connections allowed to sit unauthenticated at once. A real joiner
+    /// sends ExternalProxy right after connecting, so this only has to cover
+    /// joiners racing each other, not idle peers.
+    static constexpr int MAX_PENDING_SESSIONS = 2;
+
+    /// An unauthenticated connection is dropped after this long. Covers the
+    /// 1 s token wait in TryRegisterUser; joiners give up after 4 s
+    /// (P2pProxyClient::FAILURE_TIMEOUT_MS) anyway.
+    static constexpr uint64_t AUTH_TIMEOUT_MS = 5000;
+
     // =========================================================================
     // Lifecycle
     // =========================================================================
@@ -231,10 +241,12 @@ public:
      * session whose m_thread_done atomic has flipped to true, then
      * `delete`s the session and shrinks the array. Called from
      * AcceptLoop on every iteration and from Stop() so disconnected
-     * peers don't leak their 64 KB recv buffer (RECV_BUFFER_SIZE in
-     * the header).
+     * peers don't leak their recv buffer and stack slot.
+     *
+     * @param wait_all Join every zombie, blocking until its thread exits
+     *                 (Stop() only, after it has disconnected them all).
      */
-    void ReapZombieSessions();
+    void ReapZombieSessions(bool wait_all = false);
 
     // =========================================================================
     // Configuration
@@ -370,6 +382,17 @@ private:
                       SendFunc send_func);
 
     /**
+     * @brief Move a session out of m_sessions / m_pending_sessions into the
+     *        zombie queue. Caller holds m_mutex.
+     *
+     * A session that is in neither array was already retired by someone
+     * else (Stop, the auth timeout, a master state change or its own recv
+     * thread), so this is a no-op for it: each session reaches the zombie
+     * queue exactly once.
+     */
+    void RetireSessionLocked(P2pProxySession* session, bool notify_master);
+
+    /**
      * @brief Notify master server of connection state change
      */
     /// @gdb{tag="P2P:SESSION", msg="Master disconnect notification"}
@@ -414,9 +437,15 @@ private:
     os::ThreadType m_lease_thread;
     bool m_lease_thread_running;
 
-    // Sessions
+    // Authenticated sessions
     std::unique_ptr<P2pProxySession> m_sessions[MAX_PLAYERS];
     int m_session_count;
+
+    // Accepted but not yet authenticated sessions. TryRegisterUser moves a
+    // session from here to m_sessions; AcceptLoop drops any older than
+    // AUTH_TIMEOUT_MS.
+    std::unique_ptr<P2pProxySession> m_pending_sessions[MAX_PENDING_SESSIONS];
+    int m_pending_count;
 
     // Disconnected sessions waiting to be deleted by ReapZombieSessions().
     // Sized at 2 * MAX_PLAYERS so a burst of joiners cycling in/out can't
@@ -514,9 +543,11 @@ public:
 
     /**
      * @brief Start receive loop thread
+     * @return false if no stack slot or thread was available; the caller
+     *         then deletes the session (which closes the socket).
      */
     /// @gdb{tag="P2P:SESSION", msg="Session started"}
-    void Start();
+    bool Start();
 
     /**
      * @brief Send data to the client
@@ -535,7 +566,7 @@ public:
     /**
      * @brief Check if session is connected
      */
-    bool IsConnected() const { return m_connected; }
+    bool IsConnected() const { return m_connected.load(); }
 
 private:
     // Friend for thread entry point
@@ -576,12 +607,19 @@ private:
     // =========================================================================
 
     P2pProxyServer* m_server;
+    // Shut down by Disconnect() but closed only in the destructor, after the
+    // recv thread has been joined, so the fd number cannot be reused while
+    // that thread may still pass it to recv().
     int m_socket_fd;
     uint32_t m_remote_ip;
     uint32_t m_virtual_ip;
-    bool m_connected;
+    // Atomic: other threads disconnect sessions (Stop, auth timeout, master
+    // state change) while the recv thread reads it, and exchange() makes
+    // sure only one Disconnect() does the work.
+    std::atomic<bool> m_connected;
     bool m_authenticated;
     bool m_master_closed;
+    uint64_t m_created_ms;       ///< Accept time, for AUTH_TIMEOUT_MS
 
     // Receive thread (stack lives in a BSS pool — see g_p2p_session_stacks
     // in p2p_proxy_server.cpp). Inlining `alignas(0x1000) uint8_t stack[N]`
