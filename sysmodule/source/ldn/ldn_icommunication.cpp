@@ -8,6 +8,7 @@
 
 #include "ldn_icommunication.hpp"
 #include "ldn_shared_state.hpp"
+#include "ldn_helpers.hpp"
 #include "../config/config_ipc_service.hpp"
 #include "../debug/log.hpp"
 #include "../bsd/proxy_socket_manager.hpp"
@@ -141,6 +142,7 @@ ICommunicationService::ICommunicationService(ncm::ProgramId program_id)
     , m_client_process_id(0)
     , m_network_info{}
     , m_disconnect_reason(DisconnectReason::None)
+    , m_pending_reject_reason(DisconnectReason::None)
     , m_ipv4_address(0)
     , m_subnet_mask(0)
     , m_server_client(ryu_ldn::network::RyuLdnClientConfig(ryu_ldn::ipc::g_config))
@@ -540,6 +542,7 @@ Result ICommunicationService::InitializeSystem2(u64 unk, const ams::sf::ClientPr
 
 Result ICommunicationService::Finalize() {
     LOG_INFO("Finalize() called");
+    LeaveNetwork();
     // Disconnect from RyuLdn server if connected
     DisconnectFromServer();
 
@@ -1037,6 +1040,7 @@ Result ICommunicationService::CreateNetwork(const CreateNetworkConfig &data) {
     // forward anything to the server. We carry the buffered data here so
     // NetworkInfo.advertiseDataSize comes back populated and the host's
     // lobby finishes loading instead of hanging.
+    PrepareForResponse();
     auto send_result = m_server_client.send_create_access_point(
         request,
         m_advertise_data_size > 0 ? m_advertise_data : nullptr,
@@ -1059,6 +1063,7 @@ Result ICommunicationService::CreateNetwork(const CreateNetworkConfig &data) {
         // Rollback state and P2P server on timeout/error
         StopP2pProxyServer();
         m_state_machine.DestroyNetwork();
+        LeaveNetwork();  // a late Connected must not leave us in the room
         R_RETURN(MAKERESULT(0x10, 5)); // Response timeout
     }
 
@@ -1133,14 +1138,12 @@ Result ICommunicationService::DestroyNetwork() {
     auto result = m_state_machine.DestroyNetwork();
     R_UNLESS(result == StateTransitionResult::Success, MAKERESULT(0x10, 1));
 
-    // Server will be notified via disconnect or explicit message
-    // Clear network info
-    std::memset(&m_network_info, 0, sizeof(m_network_info));
-    m_network_connected = false;
+    // Tell the server the room is gone (Ryujinx AccessPoint.Dispose ->
+    // DisconnectNetwork). Without it the server keeps us as owner of the old
+    // game: its joiners are never dropped and our next CreateAccessPoint is
+    // answered with NetworkError.
+    LeaveNetwork();
     m_expected_scene_id = 0;
-
-    // Refresh inactivity timeout after leaving network (like Ryujinx)
-    m_inactivity_timeout.RefreshTimeout();
 
     // Update shared state
     SharedState::GetInstance().SetLdnState(CommState::AccessPoint);
@@ -1230,8 +1233,9 @@ Result ICommunicationService::CloseStation() {
     auto result = m_state_machine.CloseStation();
     R_UNLESS(result == StateTransitionResult::Success, MAKERESULT(0x10, 1));
 
-    // Clear network info
-    std::memset(&m_network_info, 0, sizeof(m_network_info));
+    // From StationConnected, leave the room on the server too (Ryujinx
+    // Station.Dispose -> DisconnectNetwork); otherwise we stay a phantom node.
+    LeaveNetwork();
 
     // Update shared state
     SharedState::GetInstance().SetLdnState(CommState::Initialized);
@@ -1303,6 +1307,7 @@ Result ICommunicationService::Connect(const ConnectNetworkData &dat, const Netwo
     // Send Connect request (12-byte header)
     LOG_INFO("Connect: sending request...");
 
+    PrepareForResponse();
     auto send_result = m_server_client.send_connect(request);
     if (send_result != ryu_ldn::network::ClientOpResult::Success) {
         LOG_ERROR("Connect: failed to send request: %s",
@@ -1315,6 +1320,7 @@ Result ICommunicationService::Connect(const ConnectNetworkData &dat, const Netwo
     if (!WaitForResponse(ryu_ldn::protocol::PacketId::Connected, 5000)) {
         LOG_ERROR("Connect: did not receive Connected response from server");
         m_state_machine.Disconnect();
+        LeaveNetwork();  // a late Connected must not leave us in the room
         R_RETURN(MAKERESULT(0x10, 5)); // Response timeout
     }
 
@@ -1343,26 +1349,8 @@ Result ICommunicationService::Disconnect() {
     auto result = m_state_machine.Disconnect();
     R_UNLESS(result == StateTransitionResult::Success, MAKERESULT(0x10, 1));
 
-    // Send disconnect notification to server (like Ryujinx DisconnectNetwork)
-    if (IsServerConnected() && m_network_connected) {
-        auto send_result = m_server_client.send_disconnect_network();
-        if (send_result != ryu_ldn::network::ClientOpResult::Success) {
-            LOG_WARN("Disconnect: failed to send disconnect to server: %s",
-                     ryu_ldn::network::client_op_result_to_string(send_result));
-            // Continue anyway - server will detect disconnect
-        } else {
-            LOG_VERBOSE("Disconnect: sent disconnect notification to server");
-        }
-    }
-
-    m_network_connected = false;
+    LeaveNetwork();
     m_disconnect_reason = DisconnectReason::User;
-
-    // Refresh inactivity timeout after leaving network (like Ryujinx)
-    m_inactivity_timeout.RefreshTimeout();
-
-    // Clear network info
-    std::memset(&m_network_info, 0, sizeof(m_network_info));
     m_expected_scene_id = 0;
 
     // Update shared state
@@ -1448,6 +1436,7 @@ Result ICommunicationService::CreateNetworkPrivate(
                 sizeof(request.ryu_network_config.game_version));
 
     // Send to server
+    PrepareForResponse();
     auto send_result = m_server_client.send_create_access_point_private(request);
     if (send_result != ryu_ldn::network::ClientOpResult::Success) {
         // Rollback state on send failure
@@ -1462,6 +1451,7 @@ Result ICommunicationService::CreateNetworkPrivate(
     if (!WaitForResponse(ryu_ldn::protocol::PacketId::Connected, response_timeout_ms)) {
         LOG_ERROR("CreateNetworkPrivate: did not receive Connected response from server");
         m_state_machine.DestroyNetwork();
+        LeaveNetwork();
         R_RETURN(MAKERESULT(0x10, 5)); // Response timeout
     }
 
@@ -1519,6 +1509,7 @@ Result ICommunicationService::ConnectPrivate(const ConnectPrivateData &data) {
     request.network_config.local_communication_version = data.networkConfig.localCommunicationVersion;
 
     // Send to server
+    PrepareForResponse();
     auto send_result = m_server_client.send_connect_private(request);
     if (send_result != ryu_ldn::network::ClientOpResult::Success) {
         // Rollback state on send failure
@@ -1533,6 +1524,7 @@ Result ICommunicationService::ConnectPrivate(const ConnectPrivateData &data) {
     if (!WaitForResponse(ryu_ldn::protocol::PacketId::Connected, response_timeout_ms)) {
         LOG_ERROR("ConnectPrivate: did not receive Connected response from server");
         m_state_machine.Disconnect();
+        LeaveNetwork();
         R_RETURN(MAKERESULT(0x10, 5)); // Response timeout
     }
 
@@ -1665,12 +1657,38 @@ void ICommunicationService::HandleServerPacket(ryu_ldn::protocol::PacketId id, c
         }
 
         case ryu_ldn::protocol::PacketId::Disconnect: {
-            // Server notifies us of disconnection
-            LOG_INFO("Received Disconnect from server");
+            // The server removed us from the room (host left, game closed,
+            // or we were rejected). The TCP session stays up. Mirrors Ryujinx
+            // HandleDisconnected -> DisconnectInternal; the state goes back
+            // to Station / AccessPoint as on real hardware.
+            if (!m_network_connected) {
+                LOG_INFO("Received Disconnect from server (not in a network, ignored)");
+                break;
+            }
             m_network_connected = false;
-            m_disconnect_reason = DisconnectReason::SystemRequest;
-            // Signal state change
-            m_state_machine.SignalStateChange();
+            std::memset(&m_network_info, 0, sizeof(m_network_info));
+
+            const CommState state = m_state_machine.GetState();
+            const bool is_host = (state == CommState::AccessPointCreated);
+            m_disconnect_reason = helpers::ServerDisconnectReason(m_pending_reject_reason, is_host);
+            m_pending_reject_reason = DisconnectReason::None;
+            LOG_INFO("Received Disconnect from server: left network (reason=%u)",
+                     static_cast<u32>(m_disconnect_reason));
+
+            // Both transitions signal the state-change event themselves.
+            // A hosted P2P server is stopped by the game's following
+            // DestroyNetwork/CloseAccessPoint; stopping it here would join
+            // its threads on the receive thread.
+            if (is_host) {
+                m_state_machine.DestroyNetwork();
+                SharedState::GetInstance().SetLdnState(CommState::AccessPoint);
+            } else if (state == CommState::StationConnected) {
+                m_state_machine.Disconnect();
+                SharedState::GetInstance().SetLdnState(CommState::Station);
+            } else {
+                m_state_machine.SignalStateChange();
+            }
+            m_inactivity_timeout.RefreshTimeout();
             break;
         }
 
@@ -1679,13 +1697,14 @@ void ICommunicationService::HandleServerPacket(ryu_ldn::protocol::PacketId id, c
             // Like Ryujinx HandleReject: _disconnectReason = reject.DisconnectReason
             if (size >= sizeof(ryu_ldn::protocol::RejectRequest)) {
                 const auto* reject = reinterpret_cast<const ryu_ldn::protocol::RejectRequest*>(data);
-                m_disconnect_reason = static_cast<DisconnectReason>(reject->disconnect_reason);
+                m_pending_reject_reason = static_cast<DisconnectReason>(reject->disconnect_reason);
                 LOG_INFO("Received Reject from server: reason=%u", reject->disconnect_reason);
             } else {
-                m_disconnect_reason = DisconnectReason::Rejected;
+                m_pending_reject_reason = DisconnectReason::Rejected;
                 LOG_INFO("Received Reject from server (no reason provided)");
             }
-            // Note: The actual disconnect will come via Disconnect packet or connection close
+            // Applied by the Disconnect packet that follows (Ryujinx keeps it
+            // in the client until DisconnectInternal reports it).
             break;
         }
 
@@ -1712,7 +1731,9 @@ void ICommunicationService::HandleServerPacket(ryu_ldn::protocol::PacketId id, c
         }
 
         case ryu_ldn::protocol::PacketId::NetworkError: {
-            HandleNetworkErrorPacket(data, size);
+            if (!HandleNetworkErrorPacket(data, size)) {
+                return;  // PortUnreachable: not a reply, Connected follows
+            }
             break;
         }
 
@@ -1877,6 +1898,7 @@ void ICommunicationService::HandleConnectedPacket(const uint8_t* data, size_t si
 
         // Set network connected flag (like Ryujinx _networkConnected = true)
         m_network_connected = true;
+        m_pending_reject_reason = DisconnectReason::None;
 
         LOG_INFO("Received Connected: node_count=%u, max=%u",
                  m_network_info.ldn.nodeCount,
@@ -2146,7 +2168,7 @@ void ICommunicationService::HandleProxyDataPacket(const uint8_t* data, size_t si
     }
 }
 
-void ICommunicationService::HandleNetworkErrorPacket(const uint8_t* data, size_t size) {
+bool ICommunicationService::HandleNetworkErrorPacket(const uint8_t* data, size_t size) {
     // Server reports an error - like Ryujinx HandleNetworkError
     if (size >= sizeof(ryu_ldn::protocol::NetworkErrorMessage)) {
         const auto* err = reinterpret_cast<const ryu_ldn::protocol::NetworkErrorMessage*>(data);
@@ -2174,13 +2196,17 @@ void ICommunicationService::HandleNetworkErrorPacket(const uint8_t* data, size_t
             // CreateNetworkCommon `if (!_useP2pProxy && _hostedProxy != null) DisposeProxy();`).
             LOG_WARN("Received NetworkError: PortUnreachable — disabling P2P (cleanup deferred)");
             m_use_p2p_proxy = false;
+            // The server still creates the room and sends Connected next
+            // (CreateAccessPoint.cs); Ryujinx does not wake any waiter here.
+            return false;
         } else {
             m_last_network_error = error_code;
             LOG_ERROR("Received NetworkError: code=%u", err->error_code);
         }
     }
-    // Signal error event (like Ryujinx _error.Set())
+    // Signal error event so the waiting request fails fast
     m_error_event.Signal();
+    return true;
 }
 
 
@@ -2222,6 +2248,37 @@ void ICommunicationService::HandleScanReplyPacket(const uint8_t* data, size_t si
 
 
 
+void ICommunicationService::PrepareForResponse() {
+    std::scoped_lock lock(m_shared_mutex);
+    m_last_response_id = ryu_ldn::protocol::PacketId::Initialize;
+    m_response_event.Clear();
+    m_error_event.Clear();
+}
+
+void ICommunicationService::LeaveNetwork() {
+    bool was_connected;
+    {
+        std::scoped_lock lock(m_shared_mutex);
+        was_connected = m_network_connected;
+        m_network_connected = false;
+        std::memset(&m_network_info, 0, sizeof(m_network_info));
+    }
+    if (!was_connected) {
+        return;
+    }
+    if (IsServerConnected()) {
+        auto send_result = m_server_client.send_disconnect_network();
+        if (send_result != ryu_ldn::network::ClientOpResult::Success) {
+            LOG_WARN("LeaveNetwork: failed to send Disconnect: %s",
+                     ryu_ldn::network::client_op_result_to_string(send_result));
+        } else {
+            LOG_INFO("LeaveNetwork: sent Disconnect to server");
+        }
+    }
+    // Ryujinx DisconnectInternal: re-arm the idle timeout once out of a room.
+    m_inactivity_timeout.RefreshTimeout();
+}
+
 bool ICommunicationService::WaitForResponse(ryu_ldn::protocol::PacketId expected_id, uint64_t timeout_ms) {
     LOG_VERBOSE("Waiting for response: type=%u, timeout=%lu ms",
                 static_cast<unsigned>(expected_id), timeout_ms);
@@ -2234,17 +2291,20 @@ bool ICommunicationService::WaitForResponse(ryu_ldn::protocol::PacketId expected
             LOG_VERBOSE("Already received Connected response (m_network_connected=true)");
             return true;
         }
+        // PrepareForResponse() reset this before the request went out, so
+        // anything here is a reply to that request.
         if (m_last_response_id == expected_id) {
             LOG_VERBOSE("Already have expected response: type=%u", static_cast<unsigned>(expected_id));
             return true;
         }
+        if (m_last_response_id == ryu_ldn::protocol::PacketId::NetworkError) {
+            LOG_ERROR("NetworkError arrived before the wait started");
+            return false;
+        }
     }
 
-    // Clear events before waiting. m_response_event and m_reject_event are
-    // AutoClear, so they reset to unsignaled. m_error_event stays ManualClear
-    // because it signals a persistent error condition (like Ryujinx's _error).
-    m_response_event.Clear();
-    m_error_event.Clear();
+    // The events were cleared by PrepareForResponse() before the send;
+    // clearing them here would drop a reply that already arrived.
 
     // Use os::MultiWait for event-driven wait — the kernel wakes this thread
     // immediately when the receive thread signals the event, instead of the

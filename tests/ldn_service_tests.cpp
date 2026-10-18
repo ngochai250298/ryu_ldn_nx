@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include "ldn/ldn_network_timeout.hpp"
+#include "ldn/ldn_helpers.hpp"
 
 using ams::mitm::ldn::NetworkTimeout;
 
@@ -131,6 +132,28 @@ static void timeout_not_expired_or_disabled_does_not_fire() {
     ASSERT_FALSE(timeout.CheckTimeout(NowMs() + 100000));
 }
 
+// ============================================================================
+// Finding 3 / finding 2 readiness: the server's Disconnect packet
+// ============================================================================
+
+// Same names and values as ams::mitm::ldn::DisconnectReason (ldn_types.hpp
+// pulls in <stratosphere.hpp>); the helper under test is the real one.
+enum class Reason : uint32_t {
+    None = 0, User = 1, SystemRequest = 2, DestroyedByUser = 3,
+    DestroyedBySystem = 4, Rejected = 5, SignalLost = 6,
+};
+
+static void server_disconnect_reason_matches_ryujinx() {
+    using ams::mitm::ldn::helpers::ServerDisconnectReason;
+    // Station dropped because the host left: DestroyedByUser (Station.cs).
+    ASSERT_TRUE(ServerDisconnectReason(Reason::None, false) == Reason::DestroyedByUser);
+    // Host whose room the server closed: DestroyedBySystem (AccessPoint.cs).
+    ASSERT_TRUE(ServerDisconnectReason(Reason::None, true) == Reason::DestroyedBySystem);
+    // A Reject that preceded the Disconnect wins (HandleReject).
+    ASSERT_TRUE(ServerDisconnectReason(Reason::Rejected, false) == Reason::Rejected);
+    ASSERT_TRUE(ServerDisconnectReason(Reason::SignalLost, true) == Reason::SignalLost);
+}
+
 int main() {
     printf("\n========================================\n");
     printf("  LDN Service Tests - ryu_ldn_nx\n");
@@ -139,6 +162,7 @@ int main() {
     RUN(timeout_callback_runs_without_lock_held);
     RUN(timeout_reports_expiry_once_without_callback);
     RUN(timeout_not_expired_or_disabled_does_not_fire);
+    RUN(server_disconnect_reason_matches_ryujinx);
 
     printf("\n========================================\n");
     printf("  Results: %d/%d passed\n", g_tests_passed, g_tests_passed + g_tests_failed);

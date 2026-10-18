@@ -435,12 +435,14 @@ private:
      * @brief Handle NetworkError packet from server
      *
      * Server reports a network error. Disables P2P on PortUnreachable
-     * and signals the error event.
+     * and signals the error event for anything else.
      *
      * @param data Packet payload
      * @param size Payload size
+     * @return false for PortUnreachable, which is informational: the server
+     *         goes on to send Connected, so it is not a reply to wait on
      */
-    void HandleNetworkErrorPacket(const uint8_t* data, size_t size);
+    bool HandleNetworkErrorPacket(const uint8_t* data, size_t size);
 
     /**
      * @brief Handle ScanReply packet from server
@@ -463,6 +465,23 @@ private:
     /// @gdb{tag="LDN:ASYNC", msg="WaitForResponse: expected_id=%u timeout_ms=%lu", args="$x1, $x2"}
     bool WaitForResponse(ryu_ldn::protocol::PacketId expected_id, uint64_t timeout_ms);
 
+    /**
+     * @brief Forget replies to earlier requests before sending a new one
+     *
+     * Resets m_last_response_id and the response/error events so that
+     * WaitForResponse only accepts a reply that arrives after this call.
+     */
+    void PrepareForResponse();
+
+    /**
+     * @brief Leave the current room (Ryujinx DisconnectNetwork)
+     *
+     * If we are in a network, tells the server with PacketId::Disconnect
+     * (the TCP link stays up) and drops the local network state. Re-arms the
+     * inactivity timeout. Must be called without m_shared_mutex held.
+     */
+    void LeaveNetwork();
+
 private:
     LdnStateMachine m_state_machine;        ///< Thread-safe state machine
     u64 m_error_state;                      ///< Error state flag
@@ -470,6 +489,7 @@ private:
 
     NetworkInfo m_network_info;             ///< Current network info
     DisconnectReason m_disconnect_reason;   ///< Last disconnect reason
+    DisconnectReason m_pending_reject_reason; ///< Reason from a server Reject, applied when the Disconnect follows
     u32 m_ipv4_address;                     ///< Assigned IPv4 address
     u32 m_subnet_mask;                      ///< Subnet mask
 
