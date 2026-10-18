@@ -11,6 +11,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <string>
+#include <iterator>
 
 using namespace ryu_ldn::config;
 
@@ -531,6 +533,109 @@ TEST(save_config_keeps_relay_keys) {
     ASSERT_STREQ(loaded.server.console_id, "switch-1");
     ASSERT_STREQ(loaded.server.token, config.server.token);
     ASSERT_EQ(loaded.server.port, config.server.port);
+}
+
+static std::string read_all(const char* path) {
+    std::ifstream f(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+// The file written by save_config must contain every key, including port.
+// (Regression: the Switch formatter used to drop `port`; now host tests run
+// that same formatter.)
+TEST(save_config_writes_port_and_relay_keys) {
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/test_save_port_%d.ini", rand());
+    Config config = get_default_config();
+    config.server.port = 4443;
+    ASSERT_EQ(save_config(path, config), ConfigResult::Success);
+    std::string text = read_all(path);
+    std::remove(path);
+    ASSERT_TRUE(text.find("port = 4443\n") != std::string::npos);
+    ASSERT_TRUE(text.find("transport = ") != std::string::npos);
+    ASSERT_TRUE(text.find("path = ") != std::string::npos);
+    ASSERT_TRUE(text.find("console_id = ") != std::string::npos);
+    ASSERT_TRUE(text.find("token = ") != std::string::npos);
+    ASSERT_TRUE(text.find("ca_file = ") != std::string::npos);
+}
+
+// Every config save must write the token back unchanged, repeatedly.
+TEST(save_config_token_round_trip_is_stable) {
+    char content[512];
+    snprintf(content, sizeof(content),
+        "[server]\nhost = relay.example\ntransport = wss\nconsole_id = switch-1\ntoken = %s\n", VALID_TOKEN);
+    TempConfigFile file(content);
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/test_token_rt_%d.ini", rand());
+    ASSERT_EQ(save_config(path, config), ConfigResult::Success);
+    std::string first = read_all(path);
+    for (int i = 0; i < 3; i++) {
+        Config again = get_default_config();
+        ASSERT_EQ(load_config(path, again), ConfigResult::Success);
+        ASSERT_STREQ(again.server.token, config.server.token);
+        ASSERT_EQ(save_config(path, again), ConfigResult::Success);
+    }
+    std::string last = read_all(path);
+    std::remove(path);
+    ASSERT_TRUE(first == last);
+    ASSERT_TRUE(last.find(std::string("token = ") + config.server.token + "\n") != std::string::npos);
+}
+
+// Overwriting an existing file works (the test io_rename refuses to replace,
+// like Horizon fs) and leaves no .tmp behind.
+TEST(save_config_overwrites_existing_without_tmp) {
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/test_save_atomic_%d.ini", rand());
+    Config config = get_default_config();
+    ASSERT_EQ(save_config(path, config), ConfigResult::Success);
+    config.server.port = 1111;
+    ASSERT_EQ(save_config(path, config), ConfigResult::Success);
+
+    Config loaded = get_default_config();
+    ASSERT_EQ(load_config(path, loaded), ConfigResult::Success);
+    ASSERT_EQ(loaded.server.port, 1111);
+
+    char tmp[272];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    std::ifstream t(tmp);
+    ASSERT_FALSE(t.good());
+    std::remove(path);
+}
+
+// Crash between "delete config.ini" and "rename tmp": boot must recover.
+TEST(ensure_config_exists_recovers_tmp) {
+    char path[256], tmp[272];
+    snprintf(path, sizeof(path), "/tmp/test_recover_%d.ini", rand());
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    std::remove(path);
+    { std::ofstream f(tmp); f << "[server]\nhost = recovered.example\nport = 777\n"; }
+
+    ASSERT_EQ(ensure_config_exists(path), ConfigResult::Success);
+    Config loaded = get_default_config();
+    ASSERT_EQ(load_config(path, loaded), ConfigResult::Success);
+    std::remove(path);
+    ASSERT_STREQ(loaded.server.host, "recovered.example");
+    ASSERT_EQ(loaded.server.port, 777);
+    std::ifstream t(tmp);
+    ASSERT_FALSE(t.good());
+}
+
+// A stale .tmp next to a valid config.ini must never win.
+TEST(ensure_config_exists_ignores_tmp_when_config_present) {
+    char path[256], tmp[272];
+    snprintf(path, sizeof(path), "/tmp/test_ignoretmp_%d.ini", rand());
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    { std::ofstream f(path); f << "[server]\nport = 1\n"; }
+    { std::ofstream f(tmp); f << "[server]\nport = 2\n"; }
+    ASSERT_EQ(ensure_config_exists(path), ConfigResult::Success);
+    Config loaded = get_default_config();
+    ASSERT_EQ(load_config(path, loaded), ConfigResult::Success);
+    std::remove(path);
+    std::remove(tmp);
+    ASSERT_EQ(loaded.server.port, 1);
 }
 
 // ============================================================================

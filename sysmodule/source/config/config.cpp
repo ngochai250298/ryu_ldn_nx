@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <new>
 
 #ifdef __SWITCH__
 #include <stratosphere.hpp>
@@ -208,7 +209,6 @@ void process_debug_key(const char* key, const char* value, DebugConfig& config) 
     }
 }
 
-#ifdef __SWITCH__
 /**
  * @brief Parse file content line by line (for ams::fs buffer-based reading)
  */
@@ -292,14 +292,16 @@ void parse_config_content(const char* content, size_t size, Config& config) {
 
 /**
  * @brief Format config content into buffer for writing
- * @return Number of bytes written
+ * @return Number of bytes written, or 0 if the buffer was too small
  */
 size_t format_config_content(char* buffer, size_t buffer_size, const Config& config) {
     size_t offset = 0;
+    bool overflow = false;
 
     #define WRITE_LINE(fmt, ...) do { \
         int written = std::snprintf(buffer + offset, buffer_size - offset, fmt "\n", ##__VA_ARGS__); \
         if (written > 0 && offset + written < buffer_size) offset += written; \
+        else overflow = true; \
     } while(0)
 
     WRITE_LINE("; ryu_ldn_nx Configuration");
@@ -340,9 +342,8 @@ size_t format_config_content(char* buffer, size_t buffer_size, const Config& con
 
     #undef WRITE_LINE
 
-    return offset;
+    return overflow ? 0 : offset;  // 0 = truncated, caller must not save
 }
-#endif // __SWITCH__
 
 } // anonymous namespace
 
@@ -375,301 +376,198 @@ Config get_default_config() {
     return config;
 }
 
+
+// =============================================================================
+// File I/O primitives (the only platform-specific part)
+//
+// load/save/ensure below are shared, so host tests run the exact parser and
+// formatter the Switch build uses.
+// =============================================================================
+
+namespace {
+
+constexpr size_t MAX_CONFIG_FILE_SIZE = 65536;
+constexpr size_t FORMAT_BUFFER_SIZE = 4096;
+
+bool make_tmp_path(const char* path, char* tmp, size_t tmp_size) {
+    size_t len = std::strlen(path);
+    if (len + 5 > tmp_size) return false;  // ".tmp" + NUL
+    std::memcpy(tmp, path, len);
+    std::memcpy(tmp + len, ".tmp", 5);
+    return true;
+}
+
 #ifdef __SWITCH__
-// =============================================================================
-// Nintendo Switch / Atmosphere Implementation
-// Uses ams::fs API to avoid kernel panic at boot
-// =============================================================================
 
-ConfigResult load_config(const char* path, Config& config) {
-    // Check if file exists using ams::fs
-    ams::fs::DirectoryEntryType entry_type;
-    if (R_FAILED(ams::fs::GetEntryType(&entry_type, path))) {
-        return ConfigResult::FileNotFound;
+bool io_exists(const char* path) {
+    ams::fs::DirectoryEntryType type;
+    return R_SUCCEEDED(ams::fs::GetEntryType(&type, path)) &&
+           type == ams::fs::DirectoryEntryType_File;
+}
+
+void io_make_parent_dir(const char* path) {
+    char dir_path[256];
+    safe_strcpy(dir_path, path, sizeof(dir_path) - 1);
+    char* last_slash = std::strrchr(dir_path, '/');
+    if (last_slash) {
+        *last_slash = '\0';
+        ams::fs::EnsureDirectory(dir_path);
     }
+}
 
-    if (entry_type != ams::fs::DirectoryEntryType_File) {
-        return ConfigResult::FileNotFound;
-    }
+void io_delete(const char* path) {
+    if (io_exists(path)) ams::fs::DeleteFile(path);
+}
 
-    // Open file for reading
+bool io_rename(const char* from, const char* to) {
+    return R_SUCCEEDED(ams::fs::RenameFile(from, to));
+}
+
+/// Create + write + flush + close. Caller deletes any stale file first.
+bool io_write(const char* path, const char* data, size_t size) {
+    if (R_FAILED(ams::fs::CreateFile(path, static_cast<s64>(size)))) return false;
+    ams::fs::FileHandle file;
+    if (R_FAILED(ams::fs::OpenFile(&file, path, ams::fs::OpenMode_Write))) return false;
+    ams::Result rc = ams::fs::WriteFile(file, 0, data, size, ams::fs::WriteOption::Flush);
+    ams::fs::CloseFile(file);
+    return R_SUCCEEDED(rc);
+}
+
+/// Returns a new[] buffer (caller frees) or nullptr; sets result on failure.
+char* io_read(const char* path, size_t& size, ConfigResult& result) {
+    if (!io_exists(path)) { result = ConfigResult::FileNotFound; return nullptr; }
     ams::fs::FileHandle file;
     if (R_FAILED(ams::fs::OpenFile(&file, path, ams::fs::OpenMode_Read))) {
-        return ConfigResult::IoError;
+        result = ConfigResult::IoError; return nullptr;
     }
-
-    // Get file size
     s64 file_size;
     if (R_FAILED(ams::fs::GetFileSize(&file_size, file))) {
-        ams::fs::CloseFile(file);
-        return ConfigResult::IoError;
+        ams::fs::CloseFile(file); result = ConfigResult::IoError; return nullptr;
     }
-
-    // Sanity check on file size (max 64KB)
-    if (file_size <= 0 || file_size > 65536) {
+    if (file_size <= 0 || file_size > static_cast<s64>(MAX_CONFIG_FILE_SIZE)) {
         ams::fs::CloseFile(file);
-        if (file_size == 0) {
-            return ConfigResult::FileNotFound;
-        }
-        return ConfigResult::ParseError;
+        result = file_size == 0 ? ConfigResult::FileNotFound : ConfigResult::ParseError;
+        return nullptr;
     }
-
-    // Allocate buffer and read file
     char* content = new (std::nothrow) char[file_size + 1];
-    if (!content) {
-        ams::fs::CloseFile(file);
-        return ConfigResult::IoError;
-    }
-
-    size_t bytes_read;
-    ams::Result read_result = ams::fs::ReadFile(&bytes_read, file, 0, content, static_cast<size_t>(file_size));
+    if (!content) { ams::fs::CloseFile(file); result = ConfigResult::IoError; return nullptr; }
+    ams::Result rc = ams::fs::ReadFile(&size, file, 0, content, static_cast<size_t>(file_size));
     ams::fs::CloseFile(file);
+    if (R_FAILED(rc)) { delete[] content; result = ConfigResult::IoError; return nullptr; }
+    content[size] = '\0';
+    return content;
+}
 
-    if (R_FAILED(read_result)) {
-        delete[] content;
-        return ConfigResult::IoError;
+#else  // host
+
+bool io_exists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+void io_make_parent_dir(const char* path) {
+    char dir_path[256];
+    safe_strcpy(dir_path, path, sizeof(dir_path) - 1);
+    char* last_slash = std::strrchr(dir_path, '/');
+    if (last_slash) {
+        *last_slash = '\0';
+        mkdir(dir_path, 0755);
     }
+}
 
-    content[bytes_read] = '\0';
+void io_delete(const char* path) { std::remove(path); }
 
-    // Parse content
-    parse_config_content(content, bytes_read, config);
+bool io_rename(const char* from, const char* to) {
+    // Like Horizon fs, refuse to replace an existing destination so tests
+    // catch a save path that forgets to delete first.
+    if (io_exists(to)) return false;
+    return std::rename(from, to) == 0;
+}
+
+bool io_write(const char* path, const char* data, size_t size) {
+    // The Switch SD card uses FAT32/exFAT which has no POSIX permission
+    // model; chmod is a no-op there.  // codeql[cpp/world-writable-file-creation]
+    FILE* file = std::fopen(path, "wb");
+    if (!file) return false;
+    bool ok = std::fwrite(data, 1, size, file) == size;
+    ok = (std::fflush(file) == 0) && ok;
+    ok = (std::fclose(file) == 0) && ok;
+    return ok;
+}
+
+char* io_read(const char* path, size_t& size, ConfigResult& result) {
+    FILE* file = std::fopen(path, "rb");
+    if (!file) { result = ConfigResult::FileNotFound; return nullptr; }
+    char* content = new (std::nothrow) char[MAX_CONFIG_FILE_SIZE + 1];
+    if (!content) { std::fclose(file); result = ConfigResult::IoError; return nullptr; }
+    size = std::fread(content, 1, MAX_CONFIG_FILE_SIZE, file);
+    std::fclose(file);
+    content[size] = '\0';
+    return content;
+}
+
+#endif
+
+/// Finish an interrupted save: config.ini deleted, config.ini.tmp complete.
+bool recover_tmp(const char* path) {
+    char tmp[272];
+    if (io_exists(path) || !make_tmp_path(path, tmp, sizeof(tmp)) || !io_exists(tmp)) {
+        return false;
+    }
+    return io_rename(tmp, path);
+}
+
+} // anonymous namespace
+
+ConfigResult load_config(const char* path, Config& config) {
+    size_t size = 0;
+    ConfigResult result = ConfigResult::Success;
+    char* content = io_read(path, size, result);
+    if (!content && result == ConfigResult::FileNotFound && recover_tmp(path)) {
+        content = io_read(path, size, result);
+    }
+    if (!content) return result;
+
+    parse_config_content(content, size, config);
     apply_constraints(config);
 
-    // The buffer held the relay token
-    std::memset(content, 0, bytes_read);
+    std::memset(content, 0, size);  // the buffer held the relay token
     delete[] content;
     return ConfigResult::Success;
 }
 
 ConfigResult save_config(const char* path, const Config& config) {
-    // Ensure parent directory exists
-    char dir_path[256];
-    safe_strcpy(dir_path, path, sizeof(dir_path) - 1);
+    char tmp[272];
+    if (!make_tmp_path(path, tmp, sizeof(tmp))) return ConfigResult::IoError;
 
-    char* last_slash = std::strrchr(dir_path, '/');
-    if (last_slash) {
-        *last_slash = '\0';
-        // Use ams::fs::EnsureDirectory which creates recursively
-        ams::fs::EnsureDirectory(dir_path);
-    }
+    io_make_parent_dir(path);
 
-    // Format config content
-    constexpr size_t buffer_size = 4096;
-    char* buffer = new (std::nothrow) char[buffer_size];
-    if (!buffer) {
-        return ConfigResult::IoError;
-    }
+    char* buffer = new (std::nothrow) char[FORMAT_BUFFER_SIZE];
+    if (!buffer) return ConfigResult::IoError;
+    size_t size = format_config_content(buffer, FORMAT_BUFFER_SIZE, config);
 
-    size_t content_size = format_config_content(buffer, buffer_size, config);
-
-    // Delete existing file if present
-    ams::fs::DirectoryEntryType entry_type;
-    if (R_SUCCEEDED(ams::fs::GetEntryType(&entry_type, path))) {
-        ams::fs::DeleteFile(path);
-    }
-
-    // Create new file
-    if (R_FAILED(ams::fs::CreateFile(path, content_size))) {
-        std::memset(buffer, 0, buffer_size);  // held the relay token
-        delete[] buffer;
-        return ConfigResult::IoError;
-    }
-
-    // Open file for writing
-    ams::fs::FileHandle file;
-    if (R_FAILED(ams::fs::OpenFile(&file, path, ams::fs::OpenMode_Write))) {
-        std::memset(buffer, 0, buffer_size);  // held the relay token
-        delete[] buffer;
-        return ConfigResult::IoError;
-    }
-
-    // Write content
-    ams::Result write_result = ams::fs::WriteFile(file, 0, buffer, content_size, ams::fs::WriteOption::Flush);
-    ams::fs::CloseFile(file);
-
-    std::memset(buffer, 0, buffer_size);  // held the relay token
+    // Horizon fs cannot rename onto an existing file, so: write the complete
+    // tmp first, then delete the old file, then rename. A crash after the
+    // delete leaves a complete tmp that ensure/load_config renames in.
+    io_delete(tmp);
+    bool ok = size > 0 && io_write(tmp, buffer, size);
+    std::memset(buffer, 0, FORMAT_BUFFER_SIZE);  // held the relay token
     delete[] buffer;
 
-    if (R_FAILED(write_result)) {
+    if (!ok) {
+        io_delete(tmp);
         return ConfigResult::IoError;
     }
-
-    return ConfigResult::Success;
+    io_delete(path);
+    return io_rename(tmp, path) ? ConfigResult::Success : ConfigResult::IoError;
 }
 
 ConfigResult ensure_config_exists(const char* path) {
-    // Check if file exists using ams::fs
-    ams::fs::DirectoryEntryType entry_type;
-    if (R_SUCCEEDED(ams::fs::GetEntryType(&entry_type, path))) {
-        if (entry_type == ams::fs::DirectoryEntryType_File) {
-            return ConfigResult::Success;  // File already exists
-        }
+    if (io_exists(path) || recover_tmp(path)) {
+        return ConfigResult::Success;
     }
-
-    // File doesn't exist, create with defaults
     Config default_config = get_default_config();
     return save_config(path, default_config);
 }
-
-#else
-// =============================================================================
-// PC/Test Implementation
-// Uses standard C file I/O for testing on desktop platforms
-// =============================================================================
-
-ConfigResult load_config(const char* path, Config& config) {
-    FILE* file = std::fopen(path, "r");
-    if (!file) {
-        return ConfigResult::FileNotFound;
-    }
-
-    char line[512];
-    Section current_section = Section::None;
-
-    while (std::fgets(line, sizeof(line), file)) {
-        // Remove trailing whitespace/newlines
-        trim_end(line);
-
-        // Skip empty lines
-        const char* trimmed = trim_start(line);
-        if (trimmed[0] == '\0') {
-            continue;
-        }
-
-        // Skip comments
-        if (trimmed[0] == ';' || trimmed[0] == '#') {
-            continue;
-        }
-
-        // Check for section header
-        Section new_section = parse_section(trimmed);
-        if (new_section != Section::None) {
-            current_section = new_section;
-            continue;
-        }
-
-        // Skip if in unknown section
-        if (current_section == Section::None || current_section == Section::Unknown) {
-            continue;
-        }
-
-        // Parse key=value
-        char* eq_pos = std::strchr(line, '=');
-        if (!eq_pos) {
-            continue;  // No '=' found, skip line
-        }
-
-        // Split into key and value
-        *eq_pos = '\0';
-        char* key = line;
-        char* value = eq_pos + 1;
-
-        // Trim key and value
-        const char* trimmed_key = trim_start(key);
-        trim_end(key);
-
-        const char* trimmed_value = trim_start(value);
-        trim_end(value);
-
-        // Copy trimmed key (need mutable copy for trim_end)
-        char key_buf[64];
-        safe_strcpy(key_buf, trimmed_key, sizeof(key_buf) - 1);
-        trim_end(key_buf);
-
-        // Process based on current section
-        switch (current_section) {
-            case Section::Server:
-                process_server_key(key_buf, trimmed_value, config.server);
-                break;
-            case Section::Ldn:
-                process_ldn_key(key_buf, trimmed_value, config.ldn);
-                break;
-            case Section::Debug:
-                process_debug_key(key_buf, trimmed_value, config.debug);
-                break;
-            default:
-                break;
-        }
-    }
-
-    std::fclose(file);
-    apply_constraints(config);
-    return ConfigResult::Success;
-}
-
-ConfigResult save_config(const char* path, const Config& config) {
-    // Create parent directory if needed
-    // Extract directory path from file path
-    char dir_path[256];
-    safe_strcpy(dir_path, path, sizeof(dir_path) - 1);
-
-    char* last_slash = std::strrchr(dir_path, '/');
-    if (last_slash) {
-        *last_slash = '\0';
-        // Create directory (mkdir -p equivalent)
-        mkdir(dir_path, 0755);
-    }
-
-    // The Switch SD card uses FAT32/exFAT which has no POSIX permission
-    // model — fopen("w") creates with default FAT attributes and chmod is
-    // a no-op on this filesystem.  // codeql[cpp/world-writable-file-creation]
-    FILE* file = std::fopen(path, "w");
-    if (!file) {
-        return ConfigResult::IoError;
-    }
-
-    std::fprintf(file, "; ryu_ldn_nx Configuration\n");
-    std::fprintf(file, "; Auto-generated on first boot\n");
-    std::fprintf(file, "; Edit this file to customize settings\n\n");
-
-    std::fprintf(file, "[server]\n");
-    std::fprintf(file, "; Relay hostname (empty = do not connect)\n");
-    std::fprintf(file, "host = %s\n", config.server.host);
-    std::fprintf(file, "; Server port\n");
-    std::fprintf(file, "port = %u\n", config.server.port);
-    std::fprintf(file, "; Secure WebSocket transport (plain TCP is refused)\n");
-    std::fprintf(file, "transport = %s\n", config.server.transport == Transport::Wss ? "wss" : "");
-    std::fprintf(file, "path = %s\n", config.server.path);
-    std::fprintf(file, "console_id = %s\n", config.server.console_id);
-    std::fprintf(file, "; Secret: 64 hex characters, one per console\n");
-    std::fprintf(file, "token = %s\n", config.server.token);
-    std::fprintf(file, "ca_file = %s\n\n", config.server.ca_file);
-
-
-    std::fprintf(file, "[ldn]\n");
-    std::fprintf(file, "; Enable LDN emulation (0/1)\n");
-    std::fprintf(file, "enabled = %d\n", config.ldn.enabled ? 1 : 0);
-    std::fprintf(file, "; Enable passphrase filtering (0/1)\n");
-    std::fprintf(file, "use_passphrase = %d\n", config.ldn.use_passphrase ? 1 : 0);
-    std::fprintf(file, "; Room passphrase (empty = public)\n");
-    std::fprintf(file, "passphrase = %s\n", config.ldn.passphrase);
-    std::fprintf(file, "; Disable P2P proxy (0/1) - like Ryujinx MultiplayerDisableP2p\n");
-    std::fprintf(file, "disable_p2p = %d\n\n", config.ldn.disable_p2p ? 1 : 0);
-
-    std::fprintf(file, "[debug]\n");
-    std::fprintf(file, "; Enable debug logging (0/1)\n");
-    std::fprintf(file, "enabled = %d\n", config.debug.enabled ? 1 : 0);
-    std::fprintf(file, "; Log level (0=errors, 1=warnings, 2=info, 3=verbose)\n");
-    std::fprintf(file, "level = %u\n", config.debug.level);
-
-    std::fclose(file);
-    return ConfigResult::Success;
-}
-
-ConfigResult ensure_config_exists(const char* path) {
-    // Try to open file to check if it exists
-    FILE* file = std::fopen(path, "r");
-    if (file) {
-        std::fclose(file);
-        return ConfigResult::Success;  // File already exists
-    }
-
-    // File doesn't exist, create with defaults
-    Config default_config = get_default_config();
-    return save_config(path, default_config);
-}
-
-#endif // __SWITCH__
 
 } // namespace ryu_ldn::config
