@@ -43,22 +43,6 @@ alignas(os::ThreadStackAlignment) static u8 g_background_thread_stack[0x4000];
 alignas(os::ThreadStackAlignment) static u8 g_p2p_connect_thread_stack[0x4000];
 
 /**
- * @brief Static callback for inactivity timeout
- *
- * Called when the NetworkTimeout expires (no network activity for 6 seconds).
- * Disconnects from the server to save resources.
- * Like Ryujinx _timeout callback that calls DisconnectInternal().
- */
-void ICommunicationService::OnInactivityTimeout() {
-    std::scoped_lock lock(g_active_service_mutex);
-
-    if (g_active_ldn_service != nullptr && !g_active_ldn_service->m_network_connected) {
-        LOG_INFO("Inactivity timeout - disconnecting from server");
-        g_active_ldn_service->DisconnectFromServer();
-    }
-}
-
-/**
  * @brief Callback for BSD MITM to send ProxyData through LDN server
  *
  * This function is registered with ProxySocketManager and called when
@@ -182,7 +166,7 @@ ICommunicationService::ICommunicationService(ncm::ProgramId program_id)
     , m_external_proxy_config{}
     , m_p2p_client(nullptr)
     , m_p2p_server(nullptr)
-    , m_inactivity_timeout(NetworkTimeout::DEFAULT_IDLE_TIMEOUT_MS, &ICommunicationService::OnInactivityTimeout)
+    , m_inactivity_timeout(NetworkTimeout::DEFAULT_IDLE_TIMEOUT_MS, nullptr)
     , m_recv_thread{}
     , m_recv_thread_running(false)
     , m_shared_mutex{}
@@ -758,7 +742,10 @@ Result ICommunicationService::Scan(
                  *reinterpret_cast<const uint32_t*>(raw + 60));
     }
 
-    R_UNLESS(IsServerConnected(), MAKERESULT(0x10, 2)); // Not connected
+    // Reconnect on demand, like Ryujinx Scan -> EnsureConnected(): the
+    // inactivity timeout drops the link 6 s after leaving a room while the
+    // game is still in Station state.
+    R_TRY(ConnectToServer());
 
     // Reset scan results buffer and events (like Ryujinx _availableGames.Clear() and _scan.Reset())
     m_scan_result_count = 0;
@@ -941,17 +928,18 @@ Result ICommunicationService::CreateNetwork(const CreateNetworkConfig &data) {
     m_expected_scene_id = data.networkConfig.intentId.sceneId;
     LOG_INFO("CreateNetwork: expected_scene_id=%u", m_expected_scene_id);
 
-    R_UNLESS(IsServerConnected(), MAKERESULT(0x10, 2)); // Not connected
-
     // Mirror Ryujinx LdnMasterProxyClient.CreateNetwork: disable the inactivity
     // timeout *before* doing any work that may take a few seconds. The whole
     // CreateAccessPoint round-trip (UPnP NatPunch + send + WaitForResponse) can
     // straddle the 6 s NetworkTimeout window, and if we wait until after the
-    // Connected response to call DisableTimeout(), OnInactivityTimeout fires
+    // Connected response to call DisableTimeout(), the inactivity timeout fires
     // mid-CreateNetwork, sees `m_network_connected == false` (we set it later
     // in this same function), and disconnects the master TCP — leaving the
     // sysmodule with an "AccessPointCreated" state but no master link.
     m_inactivity_timeout.DisableTimeout();
+
+    // Reconnect if the inactivity timeout dropped the link (EnsureConnected).
+    R_TRY(ConnectToServer());
 
     auto result = m_state_machine.CreateNetwork();
     if (result != StateTransitionResult::Success) {
@@ -1277,7 +1265,10 @@ Result ICommunicationService::Connect(const ConnectNetworkData &dat, const Netwo
     LOG_INFO("Connect: userName='%.32s', version=%u",
              dat.userConfig.userName, dat.localCommunicationVersion);
 
-    R_UNLESS(IsServerConnected(), MAKERESULT(0x10, 2)); // Not connected
+    // Like Ryujinx Connect: stop the inactivity timeout before the round
+    // trip, then reconnect if it already dropped the link (EnsureConnected).
+    m_inactivity_timeout.DisableTimeout();
+    R_TRY(ConnectToServer());
 
     auto result = m_state_machine.Connect();
     R_UNLESS(result == StateTransitionResult::Success, MAKERESULT(0x10, 1));
@@ -1401,12 +1392,11 @@ Result ICommunicationService::CreateNetworkPrivate(
              LdnStateMachine::StateToString(m_state_machine.GetState()),
              addressList.GetSize());
 
-    R_UNLESS(IsServerConnected(), MAKERESULT(0x10, 2)); // Not connected
-
     // Same reason as CreateNetwork: disable the inactivity timeout up front
-    // so OnInactivityTimeout doesn't fire mid-handshake and tear down the
-    // master TCP while m_network_connected is still false.
+    // so it doesn't fire mid-handshake and tear down the master TCP while
+    // m_network_connected is still false; then reconnect if needed.
     m_inactivity_timeout.DisableTimeout();
+    R_TRY(ConnectToServer());
 
     auto result = m_state_machine.CreateNetwork();
     if (result != StateTransitionResult::Success) {
@@ -1487,7 +1477,8 @@ Result ICommunicationService::CreateNetworkPrivate(
 }
 
 Result ICommunicationService::ConnectPrivate(const ConnectPrivateData &data) {
-    R_UNLESS(IsServerConnected(), MAKERESULT(0x10, 2)); // Not connected
+    m_inactivity_timeout.DisableTimeout();
+    R_TRY(ConnectToServer());
 
     auto result = m_state_machine.Connect();
     R_UNLESS(result == StateTransitionResult::Success, MAKERESULT(0x10, 1));
@@ -2668,9 +2659,17 @@ void ICommunicationService::ReceiveThreadFunc() {
         uint64_t current_time_ms = armTicksToNs(armGetSystemTick()) / 1000000ULL;
         m_server_client.update(current_time_ms);
 
-        // Check inactivity timeout (like Ryujinx _timeout.RefreshTimeout()
-        // called from HandleConnected, and _timeout.CheckTimeout() in update loop)
-        m_inactivity_timeout.CheckTimeout(current_time_ms);
+        // Inactivity timeout (Ryujinx NetworkTimeout -> TimeoutConnection).
+        // Acted on here, with no lock held: DisconnectFromServer() takes the
+        // non-recursive g_active_service_mutex, and the old callback path ran
+        // it while that mutex (and NetworkTimeout's own) was already held by
+        // this thread, which hung the receive thread 6 s after leaving a room.
+        // ponytail: a DisableTimeout() racing this check can still lose the
+        // link; Scan/CreateNetwork/Connect reconnect on demand, like Ryujinx.
+        if (m_inactivity_timeout.CheckTimeout(current_time_ms) && !m_network_connected) {
+            LOG_INFO("Inactivity timeout - disconnecting from server");
+            DisconnectFromServer();
+        }
 
         // Brief sleep to yield CPU when no data is available.
         // The TCP recv_timeout inside update() already blocks for ~20ms

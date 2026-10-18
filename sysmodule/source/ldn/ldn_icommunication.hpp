@@ -572,13 +572,6 @@ private:
     u16 m_expected_scene_id;                                ///< Expected sceneId from game's Scan filter (Ryujinx may use 0)
 
     /**
-     * @brief Static callback for inactivity timeout
-     *
-     * Called when the timeout expires. Disconnects from server.
-     */
-    static void OnInactivityTimeout();
-
-    /**
      * @brief Find our local node ID in the network info
      *
      * Searches through the nodes array to find the node matching our

@@ -48,28 +48,29 @@ void NetworkTimeout::DisableTimeout() {
 }
 
 bool NetworkTimeout::CheckTimeout(uint64_t current_time_ms) {
-    std::scoped_lock lock(m_mutex);
+    TimeoutCallback callback;
+    {
+        std::scoped_lock lock(m_mutex);
 
-    if (!m_active || m_callback == nullptr) {
-        return false;
-    }
+        if (!m_active || current_time_ms < m_timeout_start_ms + m_idle_timeout_ms) {
+            return false;
+        }
 
-    // Check if timeout has elapsed
-    if (current_time_ms >= m_timeout_start_ms + m_idle_timeout_ms) {
         LOG_INFO("NetworkTimeout expired after %lu ms of inactivity",
                  current_time_ms - m_timeout_start_ms);
 
         m_active = false;
-
-        // Invoke callback (must be quick, we're holding the lock)
-        // Note: Ryujinx releases the lock before calling, but our callback
-        // is just setting a flag, so it's safe to hold
-        m_callback();
-
-        return true;
+        callback = m_callback;
     }
 
-    return false;
+    // Run the callback with m_mutex released: os::Mutex is non-recursive, so a
+    // callback that touches this timeout (or takes a lock the caller of
+    // CheckTimeout already holds) would otherwise self-deadlock.
+    if (callback != nullptr) {
+        callback();
+    }
+
+    return true;
 }
 
 bool NetworkTimeout::IsActive() const {
