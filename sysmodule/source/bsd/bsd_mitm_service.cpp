@@ -480,13 +480,13 @@ Result BsdMitmService::RegisterClient(
     LOG_INFO("[BSD#%u] RegisterClient: forward returned rc=0x%x, pid_out=0x%lx",
              m_session_id, rc.GetValue(), pid_out);
 
-    // CRITICAL: Detach the handle to prevent sf::CopyHandle destructor from closing it.
-    // The handle was forwarded to the real BSD service via serviceMitmDispatchInOut,
-    // which creates a kernel-level copy. However, sf::CopyHandle is marked as "managed"
-    // by Atmosphere's command serialization, meaning its destructor would close our
-    // local handle. Since we're a MITM proxy, we must NOT close handles that belong
-    // to the client process - we only forward them.
-    transfer_memory.Detach();
+    // Do not Detach() transfer_memory. The kernel gave this process its own
+    // copy of the client's handle and the forward above copied it again into
+    // the real bsd:u, so our copy must be closed; the managed sf::CopyHandle
+    // does that when it goes out of scope. Keeping it open pins the client's
+    // transfer memory, and with it the dead process, so the next application
+    // launch blocks forever. Atmosphere-libs f32c8c5d fixes the same leak in
+    // the automatic mitm forward path.
 
     // Mark this session as registered
     if (R_SUCCEEDED(rc)) {
