@@ -169,7 +169,7 @@ Logger::~Logger() {
 
 void Logger::init(const config::DebugConfig& config, const char* log_path) {
     m_enabled = config.enabled;
-    m_level = static_cast<LogLevel>(config.level);
+    m_level = (config.level > 3) ? LogLevel::Verbose : static_cast<LogLevel>(config.level);
 
     if (log_path != nullptr) {
         safe_strcpy(m_log_path, log_path, sizeof(m_log_path) - 1);

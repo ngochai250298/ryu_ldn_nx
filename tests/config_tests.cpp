@@ -7,6 +7,7 @@
 
 #include "config/config.hpp"
 #include "config/whitelist_parser.hpp"
+#include "config/ipc_input.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -694,6 +695,74 @@ TEST(whitelist_count_is_exact_for_short_lines) {
         text += buf;
     }
     ASSERT_EQ(scan_chunks(text, 512).size(), 5000u);
+}
+
+TEST(parse_bool_is_strict) {
+    take_config_warnings(nullptr, 0);
+    TempConfigFile file("[ldn]\nenabled = FALSE\nuse_passphrase = True\ndisable_p2p = 1\n[debug]\nenabled = 0\n");
+    Config config = get_default_config();
+    config.ldn.enabled = true;
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+    ASSERT_EQ(config.ldn.enabled, false);
+    ASSERT_EQ(config.ldn.use_passphrase, true);
+    ASSERT_EQ(config.ldn.disable_p2p, true);
+    ASSERT_EQ(config.debug.enabled, false);
+    ASSERT_EQ(take_config_warnings(nullptr, 0), 0u);
+}
+
+TEST(parse_bool_invalid_keeps_default_and_warns) {
+    take_config_warnings(nullptr, 0);
+    TempConfigFile file("[ldn]\nenabled = off\nuse_passphrase =\ndisable_p2p = yes\n[debug]\nenabled = maybe\n");
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+    Config def = get_default_config();
+    ASSERT_EQ(config.ldn.enabled, def.ldn.enabled);
+    ASSERT_EQ(config.ldn.use_passphrase, def.ldn.use_passphrase);
+    ASSERT_EQ(config.ldn.disable_p2p, def.ldn.disable_p2p);
+    ASSERT_EQ(config.debug.enabled, def.debug.enabled);
+    char first[96];
+    ASSERT_EQ(take_config_warnings(first, sizeof(first)), 4u);
+    ASSERT_TRUE(strstr(first, "ldn.enabled") != nullptr);
+    ASSERT_EQ(take_config_warnings(nullptr, 0), 0u);  // reset
+}
+
+// ---- IPC string copy (real copy_ipc_string used by SetPassphrase/SetServerAddress) ----
+
+TEST(ipc_string_copy_accepts_terminated_printable) {
+    char src[64] = "my room";
+    char dest[65];
+    ASSERT_TRUE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), src, sizeof(src)));
+    ASSERT_STREQ(dest, "my room");
+}
+
+TEST(ipc_string_copy_rejects_unterminated_without_overread) {
+    // Exactly 64 non-NUL bytes: the old strcpy-style copy ran past the array.
+    // Put a guard after the array; copy must not touch it or succeed.
+    struct { char src[64]; char guard[8]; } box;
+    memset(box.src, 'A', sizeof(box.src));
+    memcpy(box.guard, "SECRET!", 8);
+    char dest[65];
+    memset(dest, 'x', sizeof(dest));
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), box.src, sizeof(box.src)));
+    ASSERT_EQ(dest[0], 'x');  // untouched on failure
+}
+
+TEST(ipc_string_copy_rejects_newlines_and_control_chars) {
+    char dest[65];
+    char a[64] = "ok\n[server]\nhost = evil";
+    char b[64] = "tab\there";
+    char c[64] = "cr\rx";
+    char d[64] = "del\x7f";
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), a, sizeof(a)));
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), b, sizeof(b)));
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), c, sizeof(c)));
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), d, sizeof(d)));
+}
+
+TEST(ipc_string_copy_rejects_too_long_for_dest) {
+    char src[64] = "0123456789";
+    char small[8];
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(small, sizeof(small), src, sizeof(src)));
 }
 
 // ============================================================================

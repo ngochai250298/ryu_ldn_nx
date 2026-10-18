@@ -62,15 +62,36 @@ void safe_strcpy(char* dest, const char* src, size_t max_len) {
     dest[i] = '\0';
 }
 
-/**
- * @brief Parse boolean value (0/1, true/false, yes/no)
- */
-bool parse_bool(const char* value) {
-    if (value[0] == '0' || value[0] == 'f' || value[0] == 'F' ||
-        value[0] == 'n' || value[0] == 'N') {
-        return false;
+uint32_t s_warning_count = 0;
+char s_first_warning[96] = {0};
+
+void note_warning(const char* key, const char* value) {
+    if (s_warning_count++ == 0) {
+        std::snprintf(s_first_warning, sizeof(s_first_warning),
+                      "invalid boolean for %s: '%.40s'", key, value);
     }
-    return true;  // Default to true for any non-false value
+}
+
+/**
+ * @brief Parse boolean value: true/false/1/0 (case-insensitive) only
+ *
+ * Anything else (including "off", "yes", empty) keeps `fallback` and records
+ * a warning, so a typo cannot silently flip a setting.
+ */
+bool parse_bool(const char* value, bool fallback, const char* key) {
+    auto eq = [value](const char* word) {
+        const char* v = value;
+        while (*word) {
+            char c = *v++;
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            if (c != *word++) return false;
+        }
+        return *v == '\0';
+    };
+    if (eq("1") || eq("true")) return true;
+    if (eq("0") || eq("false")) return false;
+    note_warning(key, value);
+    return fallback;
 }
 
 /**
@@ -188,13 +209,13 @@ void process_server_key(const char* key, const char* value, ServerConfig& config
  */
 void process_ldn_key(const char* key, const char* value, LdnConfig& config) {
     if (std::strcmp(key, "enabled") == 0) {
-        config.enabled = parse_bool(value);
+        config.enabled = parse_bool(value, config.enabled, "ldn.enabled");
     } else if (std::strcmp(key, "passphrase") == 0) {
         safe_strcpy(config.passphrase, value, MAX_PASSPHRASE_LENGTH);
     } else if (std::strcmp(key, "use_passphrase") == 0) {
-        config.use_passphrase = parse_bool(value);
+        config.use_passphrase = parse_bool(value, config.use_passphrase, "ldn.use_passphrase");
     } else if (std::strcmp(key, "disable_p2p") == 0) {
-        config.disable_p2p = parse_bool(value);
+        config.disable_p2p = parse_bool(value, config.disable_p2p, "ldn.disable_p2p");
     }
 }
 
@@ -203,7 +224,7 @@ void process_ldn_key(const char* key, const char* value, LdnConfig& config) {
  */
 void process_debug_key(const char* key, const char* value, DebugConfig& config) {
     if (std::strcmp(key, "enabled") == 0) {
-        config.enabled = parse_bool(value);
+        config.enabled = parse_bool(value, config.enabled, "debug.enabled");
     } else if (std::strcmp(key, "level") == 0) {
         config.level = parse_uint32(value);
     }
@@ -353,6 +374,16 @@ size_t format_config_content(char* buffer, size_t buffer_size, const Config& con
 }
 
 } // anonymous namespace
+
+uint32_t take_config_warnings(char* first, size_t first_size) {
+    uint32_t n = s_warning_count;
+    if (first && first_size > 0) {
+        std::snprintf(first, first_size, "%s", n ? s_first_warning : "");
+    }
+    s_warning_count = 0;
+    s_first_warning[0] = '\0';
+    return n;
+}
 
 // ============================================================================
 // Public Functions

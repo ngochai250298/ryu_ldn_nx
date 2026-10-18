@@ -32,6 +32,7 @@
 
 #include "config_ipc_service.hpp"
 #include "config.hpp"
+#include "ipc_input.hpp"
 #include "../debug/log.hpp"
 #include "../ldn/ldn_shared_state.hpp"
 #include "../network/wss_client.hpp"
@@ -58,6 +59,16 @@ config::Config g_config;
  */
 ams::os::SdkMutex g_config_mutex;
 
+namespace {
+void LogConfigWarnings() {
+    char first[96];
+    uint32_t n = config::take_config_warnings(first, sizeof(first));
+    if (n > 0) {
+        LOG_WARN("Config: %u invalid value(s) in config.ini, defaults kept (first: %s)", n, first);
+    }
+}
+}  // namespace
+
 /**
  * @brief Initialize global configuration from file
  *
@@ -74,6 +85,7 @@ void InitializeConfig() {
 
     // Load from file (overwriting defaults with file values)
     config::load_config(config::CONFIG_PATH, g_config);
+    LogConfigWarnings();
 
     LOG_INFO("Config IPC: Global config initialized");
 }
@@ -209,7 +221,11 @@ ams::Result ConfigService::GetPassphrase(ams::sf::Out<std::array<char, 64>> out)
 ams::Result ConfigService::SetPassphrase(std::array<char, 64> passphrase) {
     std::scoped_lock lk(g_config_mutex);
 
-    safe_strcpy(g_config.ldn.passphrase, passphrase.data(), config::MAX_PASSPHRASE_LENGTH);
+    if (!config::copy_ipc_string(g_config.ldn.passphrase, sizeof(g_config.ldn.passphrase),
+                                 passphrase.data(), passphrase.size())) {
+        LOG_WARN("Config IPC: SetPassphrase rejected (unterminated or control characters)");
+        R_THROW(ams::sf::ResultNotSupported());
+    }
 
     LOG_INFO("Config IPC: SetPassphrase -> '%s'", g_config.ldn.passphrase);
     R_SUCCEED();
@@ -284,7 +300,11 @@ ams::Result ConfigService::GetServerAddress(ams::sf::Out<ServerAddressIpc> out) 
 ams::Result ConfigService::SetServerAddress(const ServerAddressIpc &address) {
     std::scoped_lock lk(g_config_mutex);
 
-    safe_strcpy(g_config.server.host, address.host, config::MAX_HOST_LENGTH);
+    if (!config::copy_ipc_string(g_config.server.host, sizeof(g_config.server.host),
+                                 address.host, sizeof(address.host))) {
+        LOG_WARN("Config IPC: SetServerAddress rejected (unterminated or control characters)");
+        R_THROW(ams::sf::ResultNotSupported());
+    }
     g_config.server.port = address.port;
 
     LOG_INFO("Config IPC: SetServerAddress -> %s:%u", g_config.server.host, g_config.server.port);
@@ -305,6 +325,7 @@ ams::Result ConfigService::GetDebugEnabled(ams::sf::Out<u32> out) {
 ams::Result ConfigService::SetDebugEnabled(u32 enabled) {
     std::scoped_lock lk(g_config_mutex);
     g_config.debug.enabled = (enabled != 0);
+    debug::g_logger.SetEnabled(g_config.debug.enabled);
     LOG_INFO("Config IPC: SetDebugEnabled -> %s", g_config.debug.enabled ? "true" : "false");
     R_SUCCEED();
 }
@@ -318,7 +339,8 @@ ams::Result ConfigService::GetDebugLevel(ams::sf::Out<u32> out) {
 
 ams::Result ConfigService::SetDebugLevel(u32 level) {
     std::scoped_lock lk(g_config_mutex);
-    g_config.debug.level = level;
+    g_config.debug.level = level > 3 ? 3 : level;
+    debug::g_logger.SetLevel(g_config.debug.level);
     LOG_INFO("Config IPC: SetDebugLevel -> %u", g_config.debug.level);
     R_SUCCEED();
 }
@@ -344,6 +366,9 @@ ams::Result ConfigService::ReloadConfig(ams::sf::Out<ConfigResult> out) {
     g_config = config::get_default_config();
     config::ConfigResult result = config::load_config(config::CONFIG_PATH, g_config);
     *out = static_cast<ConfigResult>(result);
+    debug::g_logger.SetEnabled(g_config.debug.enabled);
+    debug::g_logger.SetLevel(g_config.debug.level);
+    LogConfigWarnings();
     if (result == config::ConfigResult::Success) {
         LOG_INFO("Config IPC: ReloadConfig -> Success");
     } else {

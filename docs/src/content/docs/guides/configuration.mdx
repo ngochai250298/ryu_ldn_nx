@@ -184,7 +184,9 @@ After modifying `config.ini`:
 2. Use "Force Reconnect" in the Tesla overlay, or
 3. Reboot your Switch
 
-Some settings (like `[server]` host/port) require a reconnect. Others (like `[debug]` level) take effect immediately through the overlay.
+Some settings (like `[server]` host/port) require a reconnect. Debug `enabled` and `level` take effect immediately when changed through the overlay (or after a config reload). Edits made directly to `config.ini` are only picked up on reload or reboot.
+
+Boolean values must be `true`, `false`, `1` or `0` (any case). Anything else (`yes`, `off`, an empty value) is ignored, the default is kept, and a warning is logged.
 
 ## Overlay Configuration
 
