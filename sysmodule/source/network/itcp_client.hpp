@@ -37,6 +37,8 @@ enum class ClientResult {
     ConnectionFailed,      ///< Failed to establish connection
     ConnectionLost,        ///< Connection was lost during operation
     Timeout,               ///< Operation timed out
+    TlsFailed,             ///< TLS handshake or certificate verification failed
+    Rejected,              ///< Server refused this client (e.g. HTTP upgrade not 101)
 
     // Protocol errors
     InvalidPacket,         ///< Received packet failed validation
@@ -63,6 +65,8 @@ inline const char* client_result_to_string(ClientResult result) {
         case ClientResult::ConnectionFailed: return "ConnectionFailed";
         case ClientResult::ConnectionLost:   return "ConnectionLost";
         case ClientResult::Timeout:          return "Timeout";
+        case ClientResult::TlsFailed:        return "TlsFailed";
+        case ClientResult::Rejected:         return "Rejected";
         case ClientResult::InvalidPacket:    return "InvalidPacket";
         case ClientResult::ProtocolError:    return "ProtocolError";
         case ClientResult::BufferTooSmall:   return "BufferTooSmall";
@@ -119,7 +123,9 @@ public:
      * @param host Server hostname or IP address
      * @param port Server port number
      * @param timeout_ms Connection timeout in milliseconds
-     * @return ClientResult indicating success or failure
+     * @return ClientResult indicating success or failure. A secure
+     *         transport returns TlsFailed or Rejected for those causes, so
+     *         the game is shown a cause-specific error code.
      */
     virtual ClientResult connect(const char* host, uint16_t port, uint32_t timeout_ms = 5000) = 0;
 
