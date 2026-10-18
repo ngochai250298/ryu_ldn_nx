@@ -296,6 +296,7 @@ enum class FileStatusFlags : int32_t {
  * @brief Ioctl requests (whitelisted on Switch)
  */
 enum class IoctlRequest : uint32_t {
+    FioNbio = 0x8004667E,     ///< FIONBIO - set/clear non-blocking (int in)
     FioNread = 0x4004667F,    ///< FIONREAD - bytes available
     SiocAtMark = 0x40047307,  ///< SIOCATMARK - at OOB mark?
 };
@@ -433,5 +434,47 @@ enum class BsdCommand : uint32_t {
     // [15.0.0+]
     RegisterResourceStatisticsName = 32,
 };
+
+
+// =============================================================================
+// Message Flags
+// =============================================================================
+
+constexpr int32_t MSG_FLAG_PEEK = 0x2;       ///< MSG_PEEK
+constexpr int32_t MSG_FLAG_DONTWAIT = 0x80;  ///< MSG_DONTWAIT
+
+// =============================================================================
+// IPC Reply Layout
+// =============================================================================
+
+/**
+ * @brief Leading words of every bsd:u reply
+ *
+ * libnx bsd.c `_bsdDispatchImpl` parses every reply as
+ * `struct { int ret; int errno_; }` followed by any extra outputs
+ * (addrlen/optlen), and reads errno_ only when ret < 0.
+ */
+struct BsdReply {
+    int32_t ret;
+    int32_t errno_;
+};
+
+/// Reply for a result that is >= 0 on success or -errno on failure.
+constexpr BsdReply MakeReply(int32_t result) {
+    return result < 0 ? BsdReply{-1, -result} : BsdReply{result, 0};
+}
+
+/**
+ * @brief select() timeout as sent in the request (libnx bsd.c BsdSelectTimeval)
+ *
+ * A 64-bit `struct timeval` followed by an is_null flag; 24 bytes, so it
+ * sits at offset 8 of the request after `int nfds`.
+ */
+struct SelectTimeval {
+    int64_t tv_sec;
+    int64_t tv_usec;
+    bool is_null;
+};
+static_assert(sizeof(SelectTimeval) == 24, "SelectTimeval must be 24 bytes");
 
 } // namespace ryu_ldn::bsd

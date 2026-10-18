@@ -86,57 +86,34 @@ public:
         u64 tmem_size,
         sf::CopyHandle&& transfer_memory);
 
-    /// @gdb{tag="BSD:LIFECYCLE", msg="StartMonitoring: pid=%lu", args="$x2"}
-    Result StartMonitoring(sf::Out<s32> out_errno, u64 pid);
-
     /// @gdb{tag="BSD:SOCKET", msg="Socket: domain=%d type=%d protocol=%d", args="$x3, $x4, $x5"}
-    Result Socket(
-        sf::Out<s32> out_errno, sf::Out<s32> out_fd,
-        s32 domain, s32 type, s32 protocol);
+    Result Socket(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 domain, s32 type, s32 protocol);
 
     /// @gdb{tag="BSD:SOCKET", msg="SocketExempt: domain=%d type=%d protocol=%d", args="$x3, $x4, $x5"}
-    Result SocketExempt(
-        sf::Out<s32> out_errno, sf::Out<s32> out_fd,
-        s32 domain, s32 type, s32 protocol);
-
-    /// @gdb{tag="BSD:SOCKET", msg="Open"}
-    Result Open(
-        sf::Out<s32> out_errno, sf::Out<s32> out_fd,
-        const sf::InBuffer& path);
+    Result SocketExempt(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 domain, s32 type, s32 protocol);
 
     /// @gdb{tag="BSD:CONFIG", msg="Select: nfds=%d", args="$x3"}
     Result Select(
-        sf::Out<s32> out_errno, sf::Out<s32> out_count,
-        s32 nfds, const sf::InAutoSelectBuffer& readfds_in,
+        sf::Out<s32> out_ret, sf::Out<s32> out_errno,
+        s32 nfds, const ryu_ldn::bsd::SelectTimeval& timeout,
+        const sf::InAutoSelectBuffer& readfds_in,
         const sf::InAutoSelectBuffer& writefds_in,
         const sf::InAutoSelectBuffer& errorfds_in,
-        const sf::InAutoSelectBuffer& timeout,
         sf::OutAutoSelectBuffer readfds_out,
         sf::OutAutoSelectBuffer writefds_out,
         sf::OutAutoSelectBuffer errorfds_out);
 
-    /// @gdb{tag="BSD:CONFIG", msg="Poll: nfds=%d timeout=%d", args="$x4, $x5"}
+    /// @gdb{tag="BSD:CONFIG", msg="Poll: nfds=%d timeout=%d", args="$x5, $x6"}
     Result Poll(
-        sf::Out<s32> out_errno, sf::Out<s32> out_count,
+        sf::Out<s32> out_ret, sf::Out<s32> out_errno,
         const sf::InAutoSelectBuffer& fds_in,
         sf::OutAutoSelectBuffer fds_out,
         s32 nfds, s32 timeout);
 
-    /// @gdb{tag="BSD:CONFIG", msg="Sysctl"}
-    Result Sysctl(
-        sf::Out<s32> out_errno,
-        const sf::InBuffer& name,
-        const sf::InBuffer& old_val_in,
-        sf::OutBuffer old_val_out,
-        const sf::InBuffer& new_val);
-
     /// @gdb{tag="BSD:DATA", msg="Recv: fd=%d flags=%d", args="$x3, $x4"}
-    Result Recv(
-        sf::Out<s32> out_errno, sf::Out<s32> out_size,
-        s32 fd, s32 flags,
-        sf::OutAutoSelectBuffer buffer);
+    Result Recv(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 flags, sf::OutAutoSelectBuffer buffer);
 
-    /// @gdb{tag="BSD:DATA", msg="RecvFrom: fd=%d flags=%d", args="$x3, $x4"}
+    /// @gdb{tag="BSD:DATA", msg="RecvFrom: fd=%d flags=%d", args="$x4, $x5"}
     Result RecvFrom(
         sf::Out<s32> out_ret, sf::Out<s32> out_errno, sf::Out<u32> out_addrlen,
         s32 fd, s32 flags,
@@ -144,132 +121,68 @@ public:
         sf::OutAutoSelectBuffer addr_out);
 
     /// @gdb{tag="BSD:DATA", msg="Send: fd=%d flags=%d", args="$x3, $x4"}
-    Result Send(
-        sf::Out<s32> out_errno, sf::Out<s32> out_size,
-        s32 fd, s32 flags,
-        const sf::InAutoSelectBuffer& buffer);
+    Result Send(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 flags, const sf::InAutoSelectBuffer& buffer);
 
     /// @gdb{tag="BSD:DATA", msg="SendTo: fd=%d flags=%d", args="$x3, $x4"}
     Result SendTo(
-        sf::Out<s32> out_errno, sf::Out<s32> out_size,
+        sf::Out<s32> out_ret, sf::Out<s32> out_errno,
         s32 fd, s32 flags,
         const sf::InAutoSelectBuffer& buffer,
         const sf::InAutoSelectBuffer& addr);
 
-    /// @gdb{tag="BSD:CONNECT", msg="Accept: fd=%d", args="$x3"}
-    Result Accept(
-        sf::Out<s32> out_errno, sf::Out<s32> out_fd,
-        s32 fd,
-        sf::OutAutoSelectBuffer addr_out);
+    /// @gdb{tag="BSD:CONNECT", msg="Accept: fd=%d", args="$x4"}
+    Result Accept(sf::Out<s32> out_ret, sf::Out<s32> out_errno, sf::Out<u32> out_addrlen, s32 fd, sf::OutAutoSelectBuffer addr_out);
 
-    /// @gdb{tag="BSD:CONNECT", msg="Bind: fd=%d", args="$x2"}
-    Result Bind(
-        sf::Out<s32> out_errno,
-        s32 fd,
-        const sf::InAutoSelectBuffer& addr);
+    /// @gdb{tag="BSD:CONNECT", msg="Bind: fd=%d", args="$x3"}
+    Result Bind(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, const sf::InAutoSelectBuffer& addr);
 
-    /// @gdb{tag="BSD:CONNECT", msg="Connect: fd=%d", args="$x2"}
-    Result Connect(
-        sf::Out<s32> out_errno,
-        s32 fd,
-        const sf::InAutoSelectBuffer& addr);
+    /// @gdb{tag="BSD:CONNECT", msg="Connect: fd=%d", args="$x3"}
+    Result Connect(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, const sf::InAutoSelectBuffer& addr);
 
-    /// @gdb{tag="BSD:CONNECT", msg="GetPeerName: fd=%d", args="$x2"}
-    Result GetPeerName(
-        sf::Out<s32> out_errno,
-        s32 fd,
-        sf::OutAutoSelectBuffer addr_out);
+    /// @gdb{tag="BSD:CONNECT", msg="GetPeerName: fd=%d", args="$x4"}
+    Result GetPeerName(sf::Out<s32> out_ret, sf::Out<s32> out_errno, sf::Out<u32> out_addrlen, s32 fd, sf::OutAutoSelectBuffer addr_out);
 
-    /// @gdb{tag="BSD:CONNECT", msg="GetSockName: fd=%d", args="$x2"}
-    Result GetSockName(
-        sf::Out<s32> out_errno,
-        s32 fd,
-        sf::OutAutoSelectBuffer addr_out);
+    /// @gdb{tag="BSD:CONNECT", msg="GetSockName: fd=%d", args="$x4"}
+    Result GetSockName(sf::Out<s32> out_ret, sf::Out<s32> out_errno, sf::Out<u32> out_addrlen, s32 fd, sf::OutAutoSelectBuffer addr_out);
 
-    /// @gdb{tag="BSD:CONFIG", msg="GetSockOpt: fd=%d level=%d optname=%d", args="$x2, $x3, $x4"}
+    /// @gdb{tag="BSD:CONFIG", msg="GetSockOpt: fd=%d level=%d optname=%d", args="$x4, $x5, $x6"}
     Result GetSockOpt(
-        sf::Out<s32> out_errno,
+        sf::Out<s32> out_ret, sf::Out<s32> out_errno, sf::Out<u32> out_optlen,
         s32 fd, s32 level, s32 optname,
         sf::OutAutoSelectBuffer optval);
 
-    /// @gdb{tag="BSD:CONNECT", msg="Listen: fd=%d backlog=%d", args="$x2, $x3"}
-    Result Listen(
-        sf::Out<s32> out_errno,
-        s32 fd, s32 backlog);
+    /// @gdb{tag="BSD:CONNECT", msg="Listen: fd=%d backlog=%d", args="$x3, $x4"}
+    Result Listen(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 backlog);
 
     /// @gdb{tag="BSD:CONFIG", msg="Ioctl: fd=%d request=0x%x", args="$x3, $x4"}
     Result Ioctl(
-        sf::Out<s32> out_errno, sf::Out<s32> out_result,
+        sf::Out<s32> out_ret, sf::Out<s32> out_errno,
         s32 fd, u32 request, u32 bufcount,
-        const sf::InAutoSelectBuffer& buf_in,
-        sf::OutAutoSelectBuffer buf_out);
+        const sf::InAutoSelectBuffer& in1, const sf::InAutoSelectBuffer& in2,
+        const sf::InAutoSelectBuffer& in3, const sf::InAutoSelectBuffer& in4,
+        sf::OutAutoSelectBuffer out1, sf::OutAutoSelectBuffer out2,
+        sf::OutAutoSelectBuffer out3, sf::OutAutoSelectBuffer out4);
 
     /// @gdb{tag="BSD:CONFIG", msg="Fcntl: fd=%d cmd=%d arg=%d", args="$x3, $x4, $x5"}
-    Result Fcntl(
-        sf::Out<s32> out_errno, sf::Out<s32> out_result,
-        s32 fd, s32 cmd, s32 arg);
+    Result Fcntl(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 cmd, s32 arg);
 
-    /// @gdb{tag="BSD:CONFIG", msg="SetSockOpt: fd=%d level=%d optname=%d", args="$x2, $x3, $x4"}
+    /// @gdb{tag="BSD:CONFIG", msg="SetSockOpt: fd=%d level=%d optname=%d", args="$x3, $x4, $x5"}
     Result SetSockOpt(
-        sf::Out<s32> out_errno,
+        sf::Out<s32> out_ret, sf::Out<s32> out_errno,
         s32 fd, s32 level, s32 optname,
         const sf::InAutoSelectBuffer& optval);
 
-    /// @gdb{tag="BSD:CONNECT", msg="Shutdown: fd=%d how=%d", args="$x2, $x3"}
-    Result Shutdown(
-        sf::Out<s32> out_errno,
-        s32 fd, s32 how);
-
-    /// @gdb{tag="BSD:CONNECT", msg="ShutdownAllSockets: pid=%lu how=%d", args="$x2, $x3"}
-    Result ShutdownAllSockets(
-        sf::Out<s32> out_errno,
-        u64 pid, s32 how);
+    /// @gdb{tag="BSD:CONNECT", msg="Shutdown: fd=%d how=%d", args="$x3, $x4"}
+    Result Shutdown(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 how);
 
     /// @gdb{tag="BSD:DATA", msg="Write: fd=%d", args="$x3"}
-    Result Write(
-        sf::Out<s32> out_errno, sf::Out<s32> out_size,
-        s32 fd,
-        const sf::InAutoSelectBuffer& buffer);
+    Result Write(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, const sf::InAutoSelectBuffer& buffer);
 
     /// @gdb{tag="BSD:DATA", msg="Read: fd=%d", args="$x3"}
-    Result Read(
-        sf::Out<s32> out_errno, sf::Out<s32> out_size,
-        s32 fd,
-        sf::OutAutoSelectBuffer buffer);
+    Result Read(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, sf::OutAutoSelectBuffer buffer);
 
-    /// @gdb{tag="BSD:SOCKET", msg="Close: fd=%d", args="$x2"}
-    Result Close(
-        sf::Out<s32> out_errno,
-        s32 fd);
-
-    /// @gdb{tag="BSD:SOCKET", msg="DuplicateSocket: fd=%d target_pid=%lu", args="$x3, $x4"}
-    Result DuplicateSocket(
-        sf::Out<s32> out_errno, sf::Out<s32> out_fd,
-        s32 fd, u64 target_pid);
-
-    Result GetResourceStatistics(
-        sf::Out<s32> out_errno,
-        sf::OutBuffer out_stats,
-        u64 pid);
-
-    Result RecvMMsg(
-        sf::Out<s32> out_errno, sf::Out<s32> out_count,
-        s32 fd, s32 vlen, s32 flags, s32 timeout,
-        sf::OutAutoSelectBuffer out_data);
-
-    Result SendMMsg(
-        sf::Out<s32> out_errno, sf::Out<s32> out_count,
-        s32 fd, s32 vlen, s32 flags,
-        const sf::InAutoSelectBuffer& in_data);
-
-    Result EventFd(
-        sf::Out<s32> out_errno, sf::Out<s32> out_fd,
-        u64 initval, s32 flags);
-
-    Result RegisterResourceStatisticsName(
-        sf::Out<s32> out_errno,
-        u64 pid,
-        const sf::InBuffer& name);
+    /// @gdb{tag="BSD:SOCKET", msg="Close: fd=%d", args="$x3"}
+    Result Close(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd);
 
     Result RegisterClientShared(
         sf::Out<u64> out_result,
