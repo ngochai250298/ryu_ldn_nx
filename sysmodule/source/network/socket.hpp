@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 
@@ -184,7 +185,8 @@ public:
 
 private:
     int m_fd;
-    bool m_connected;
+    /// Atomic: sender threads read it while the receive thread clears it
+    std::atomic<bool> m_connected;
 
     /**
      * @brief Create TCP socket

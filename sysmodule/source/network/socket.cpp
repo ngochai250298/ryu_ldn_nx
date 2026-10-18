@@ -302,7 +302,7 @@ Socket::~Socket() {
  */
 Socket::Socket(Socket&& other) noexcept
     : m_fd(other.m_fd)
-    , m_connected(other.m_connected)
+    , m_connected(other.m_connected.load())
 {
     // Invalidate the source socket
     other.m_fd = -1;
@@ -325,7 +325,7 @@ Socket& Socket::operator=(Socket&& other) noexcept {
 
         // Transfer ownership
         m_fd = other.m_fd;
-        m_connected = other.m_connected;
+        m_connected = other.m_connected.load();
 
         // Invalidate source
         other.m_fd = -1;
@@ -402,6 +402,13 @@ SocketResult Socket::connect(const char* host, uint16_t port, uint32_t timeout_m
     // Don't allow connecting if already connected
     if (m_connected) {
         return SocketResult::AlreadyConnected;
+    }
+
+    // A send/recv error clears m_connected but leaves the fd open (another
+    // thread may still be using it). Reusing that dead socket fails with
+    // EINVAL, so start from a fresh one.
+    if (m_fd >= 0) {
+        close();
     }
 
     // Create the underlying socket

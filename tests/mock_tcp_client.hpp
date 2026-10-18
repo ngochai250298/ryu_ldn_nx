@@ -9,6 +9,7 @@
 #pragma once
 
 #include "network/itcp_client.hpp"
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -25,7 +26,7 @@ struct MockPacket {
 
 class MockTcpClient : public ITcpClient {
 public:
-    bool connected = false;
+    std::atomic<bool> connected{false};
     bool initialized = false;
     bool initialize_should_fail = false;
 

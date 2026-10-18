@@ -1109,6 +1109,14 @@ TEST(send_after_peer_reset_is_connection_reset) {
     ASSERT_EQ(sr, SocketResult::ConnectionReset);
     ASSERT_TRUE(!sock.is_connected());
 
+    // Reconnecting must not reuse the dead fd (EINVAL on Horizon)
+    ASSERT_EQ(sock.connect("127.0.0.1", port, 2000), SocketResult::Success);
+    int accepted2 = ::accept(server_fd, nullptr, nullptr);
+    ASSERT_TRUE(accepted2 >= 0);
+    size_t sent = 0;
+    ASSERT_EQ(sock.send(data, sizeof(data), sent), SocketResult::Success);
+
+    ::close(accepted2);
     ::close(server_fd);
     sock.close();
 }

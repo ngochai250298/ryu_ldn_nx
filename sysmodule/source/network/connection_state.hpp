@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 
 namespace ryu_ldn {
@@ -173,7 +174,9 @@ public:
     static const char* event_to_string(ConnectionEvent event);
 
 private:
-    ConnectionState m_state;
+    /// Atomic: other threads query the state while the owner (holding
+    /// RyuLdnClient's connection mutex) changes it
+    std::atomic<ConnectionState> m_state;
     StateChangeCallback m_callback;
     uint32_t m_retry_count;
 

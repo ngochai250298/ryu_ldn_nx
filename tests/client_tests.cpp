@@ -48,7 +48,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <chrono>
 #include <memory>
+#include <thread>
 
 #include "network/client.hpp"
 #include "network/socket.hpp"
@@ -1275,6 +1278,94 @@ bool test_transport_drop_with_generic_error_leaves_ready() {
 }
 
 // ============================================================================
+// Concurrency (finding 7)
+// ============================================================================
+
+/**
+ * @brief Mock that flags connect()/disconnect() overlapping a receive
+ *
+ * The real transports are not safe against that: TcpClient closes the
+ * fd and resets the buffer under the reader, WssClient frees the TLS
+ * session while the reader polls the fd.
+ */
+class OverlapMock : public MockTcpClient {
+public:
+    std::atomic<bool> in_recv{false};
+    std::atomic<bool> overlap{false};
+
+    ClientResult connect(const char* host, uint16_t port, uint32_t timeout_ms) override {
+        if (in_recv) overlap = true;
+        return MockTcpClient::connect(host, port, timeout_ms);
+    }
+    void disconnect() override {
+        if (in_recv) overlap = true;
+        MockTcpClient::disconnect();
+    }
+    ClientResult receive_packet(PacketId& type, void* payload, size_t payload_buffer_size,
+                                size_t& payload_size, int32_t /*timeout_ms*/) override {
+        in_recv = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        in_recv = false;
+        (void)payload; (void)payload_buffer_size;
+        type = static_cast<PacketId>(0xFF);
+        payload_size = 0;
+        return ClientResult::Timeout;
+    }
+};
+
+/**
+ * @brief connect()/disconnect() on one thread never overlap update() on another
+ *
+ * Mirrors ldn: the receive thread calls update() while IPC threads call
+ * connect()/disconnect(). Under the old code the transport saw
+ * disconnect() in the middle of receive_packet(). Both sides run on
+ * worker threads with a timed join, so a deadlock fails the test instead
+ * of hanging the suite.
+ */
+bool test_concurrent_connect_disconnect_vs_update() {
+    auto owned = std::make_unique<OverlapMock>();
+    OverlapMock* mock = owned.get();
+    RyuLdnClientConfig cfg;
+    cfg.auto_reconnect = true;
+    RyuLdnClient client(cfg, std::move(owned));
+    client.connect("127.0.0.1", 30456);
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> finished{0};
+    std::thread recv_thread([&] {
+        uint64_t t = 1000;
+        while (!stop) {
+            client.update(t += 5);
+            std::this_thread::yield();
+        }
+        finished++;
+    });
+    std::thread ipc_thread([&] {
+        for (int i = 0; i < 100; i++) {
+            client.disconnect();
+            client.connect();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        stop = true;
+        finished++;
+    });
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (finished < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (finished < 2) {
+        printf("    FAIL: threads did not finish in 10 s (deadlock)\n");
+        fflush(stdout);
+        std::_Exit(1);  // Cannot join or destroy the client safely
+    }
+    recv_thread.join();
+    ipc_thread.join();
+    ASSERT_TRUE(!mock->overlap);
+    return true;
+}
+
+// ============================================================================
 // String Conversion
 // ============================================================================
 
@@ -2474,6 +2565,7 @@ int main() {
     RUN_TEST(test_update_error_state_noop);
     RUN_TEST(test_send_scan_connection_lost_callback);
     RUN_TEST(test_transport_drop_with_generic_error_leaves_ready);
+    RUN_TEST(test_concurrent_connect_disconnect_vs_update);
 
     printf("\nconnect() edge cases:\n");
     RUN_TEST(test_connect_no_args);
