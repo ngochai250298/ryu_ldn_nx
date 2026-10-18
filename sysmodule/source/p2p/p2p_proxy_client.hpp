@@ -265,12 +265,12 @@ private:
     void ReceiveLoop();
 
     /**
-     * @brief Process received data
-     * @param data Buffer containing packet(s)
-     * @param size Size of data in buffer
+     * @brief Feed @p received new bytes (already in m_rx) to the frame
+     *        assembler and dispatch every complete frame
+     * @return false if the stream is corrupt and the connection must close
      */
     /// @gdb{tag="P2P:CLIENT", msg="Processing received data"}
-    void ProcessData(const uint8_t* data, size_t size);
+    bool ProcessData(size_t received);
 
     /// Handle one complete, header-validated frame.
     void DispatchFrame(const ryu_ldn::protocol::LdnHeader& header,
@@ -316,9 +316,9 @@ private:
     os::ThreadType m_recv_thread;
     bool m_recv_thread_running;
 
-    // Receive buffer
-    static constexpr size_t RECV_BUFFER_SIZE = 0x10000;
-    uint8_t m_recv_buffer[RECV_BUFFER_SIZE];
+    // TCP stream reassembly, one frame at most (was a 64 KB recv buffer
+    // that dropped any frame split across two recv() calls)
+    FrameAssembler<P2P_MAX_FRAME_SIZE> m_rx;
 
     // Encode buffer for SendProxyData, guarded by m_mutex. Keeps the frame
     // off the caller's (MITM) stack.

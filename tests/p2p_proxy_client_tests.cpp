@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <arpa/inet.h>
 
+#include "p2p/p2p_frame.hpp"
+
 // =============================================================================
 // Minimal Test Framework
 // =============================================================================
@@ -49,9 +51,6 @@ namespace p2p_client {
     // Timeout constants (matching Ryujinx)
     constexpr int FAILURE_TIMEOUT_MS = 4000;
     constexpr int CONNECT_TIMEOUT_MS = 5000;
-
-    // Receive buffer size
-    constexpr size_t RECV_BUFFER_SIZE = 0x10000;  // 64KB
 }
 
 // =============================================================================
@@ -125,9 +124,10 @@ TEST(constants_connect_timeout_reasonable) {
 }
 
 TEST(constants_recv_buffer_size) {
-    // 64KB receive buffer
-    ASSERT_EQ(p2p_client::RECV_BUFFER_SIZE, 0x10000U);
-    ASSERT_EQ(p2p_client::RECV_BUFFER_SIZE, 65536U);
+    // The receive (reassembly) buffer holds one frame: 2 KB, enough for a
+    // ProxyData carrying the BSD MITM's 2000 B datagram cap.
+    ASSERT_EQ(ams::mitm::p2p::P2P_MAX_FRAME_SIZE, 2048U);
+    ASSERT_TRUE(ams::mitm::p2p::P2P_MAX_PROXY_PAYLOAD >= 2000U);
 }
 
 // =============================================================================

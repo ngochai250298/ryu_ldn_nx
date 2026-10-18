@@ -310,6 +310,7 @@ bool P2pProxyClient::Connect(const uint8_t* ip_bytes, size_t ip_len, uint16_t po
 
     m_connected = true;
     m_recv_thread_running = true;
+    m_rx.Reset();  // no leftovers from a previous connection
 
     // Priority 7 — same as P2pProxySession's recv thread, slightly below
     // the accept thread (5). The original `0x2C` (= 44) was outside
@@ -586,7 +587,7 @@ void P2pProxyClient::ReceiveLoop() {
 
     while (m_recv_thread_running && !m_disposed) {
         // Receive data (blocking)
-        ssize_t received = recv(m_socket_fd, m_recv_buffer, RECV_BUFFER_SIZE, 0);
+        ssize_t received = recv(m_socket_fd, m_rx.WritePtr(), m_rx.Writable(), 0);
 
         if (received <= 0) {
             if (received == 0) {
@@ -598,7 +599,9 @@ void P2pProxyClient::ReceiveLoop() {
         }
 
         // Process received data
-        ProcessData(m_recv_buffer, static_cast<size_t>(received));
+        if (!ProcessData(static_cast<size_t>(received))) {
+            break;
+        }
     }
 
     LOG_VERBOSE("P2P client: recv thread exiting");
@@ -617,25 +620,26 @@ void P2pProxyClient::ReceiveLoop() {
 /**
  * @brief Process received data
  *
- * Parses the received buffer and dispatches each complete packet to
- * the appropriate handler.
+ * Dispatches each complete packet to the appropriate handler; m_rx keeps a
+ * packet split across recv() calls until the rest arrives.
  *
- * @param data Buffer containing received data
- * @param size Number of bytes in buffer
+ * @param received Bytes the last recv() wrote at m_rx.WritePtr()
  */
-void P2pProxyClient::ProcessData(const uint8_t* data, size_t size) {
-    size_t consumed = 0;
-    const FrameStatus status = ForEachFrame(data, size, consumed,
+bool P2pProxyClient::ProcessData(size_t received) {
+    const FrameStatus status = m_rx.Commit(received,
         [this](const ryu_ldn::protocol::LdnHeader& header, const uint8_t* payload, size_t len) {
             DispatchFrame(header, payload, len);
             return true;
         });
 
     if (status == FrameStatus::Invalid) {
-        LOG_WARN("P2P client: invalid frame header, dropping %zu bytes", size - consumed);
-    } else if (consumed < size) {
-        LOG_WARN("P2P client: incomplete packet dropped (%zu bytes)", size - consumed);
+        LOG_WARN("P2P client: invalid frame header from host, closing");
+        return false;
     }
+    if (status == FrameStatus::Oversized) {
+        LOG_WARN("P2P client: dropping frame larger than %zu bytes", P2P_MAX_FRAME_SIZE);
+    }
+    return true;
 }
 
 /**

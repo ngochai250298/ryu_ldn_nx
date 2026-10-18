@@ -580,10 +580,11 @@ private:
     void ReceiveLoop();
 
     /**
-     * @brief Process received data
+     * @brief Feed @p received new bytes (already in m_rx) to the frame
+     *        assembler and dispatch every complete frame
      */
     /// @gdb{tag="P2P:ROUTE", msg="Session data processing"}
-    void ProcessData(const uint8_t* data, size_t size);
+    void ProcessData(size_t received);
 
     /// Handle one complete, header-validated frame.
     void DispatchFrame(const ryu_ldn::protocol::LdnHeader& header,
@@ -636,9 +637,9 @@ private:
     // stack mid-return and is UB).
     std::atomic<bool> m_thread_done{false};
 
-    // Receive buffer
-    static constexpr size_t RECV_BUFFER_SIZE = 0x10000;
-    uint8_t m_recv_buffer[RECV_BUFFER_SIZE];
+    // TCP stream reassembly, one frame at most (was a 64 KB recv buffer
+    // that dropped any frame split across two recv() calls)
+    FrameAssembler<P2P_MAX_FRAME_SIZE> m_rx;
 
     friend class P2pProxyServer;  // for the reaper path
 };

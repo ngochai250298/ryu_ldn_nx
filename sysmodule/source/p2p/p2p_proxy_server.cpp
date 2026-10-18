@@ -1990,7 +1990,7 @@ void P2pProxySession::ReceiveLoop() {
     ryu_ldn::debug::g_logger.flush();
     uint64_t last_recv_ms = entry_ms;
     while (m_connected) {
-        ssize_t received = recv(m_socket_fd, m_recv_buffer, RECV_BUFFER_SIZE, 0);
+        ssize_t received = recv(m_socket_fd, m_rx.WritePtr(), m_rx.Writable(), 0);
 
         const uint64_t now_ms = NowMs();
         if (received <= 0) {
@@ -2014,7 +2014,7 @@ void P2pProxySession::ReceiveLoop() {
         ryu_ldn::debug::g_logger.flush();
         last_recv_ms = now_ms;
         // Process received data
-        ProcessData(m_recv_buffer, static_cast<size_t>(received));
+        ProcessData(static_cast<size_t>(received));
     }
 
     // Connection ended - cleanup
@@ -2024,19 +2024,14 @@ void P2pProxySession::ReceiveLoop() {
 /**
  * @brief Process received data as LDN packets
  *
- * @param data Pointer to received data
- * @param size Size of received data
+ * @param received Bytes the last recv() wrote at m_rx.WritePtr()
  *
- * Parses the data as LDN protocol packets and dispatches to handlers.
- * Each packet has:
- * - LdnHeader (magic, type, data_size)
- * - Payload (data_size bytes)
- *
- * Multiple packets may be received in a single recv() call due to TCP streaming.
+ * Each packet is an LdnHeader (magic, type, data_size) plus data_size
+ * bytes. TCP may deliver several packets in one recv() or split one across
+ * several; m_rx keeps the partial tail until the rest arrives.
  */
-void P2pProxySession::ProcessData(const uint8_t* data, size_t size) {
-    size_t consumed = 0;
-    const FrameStatus status = ForEachFrame(data, size, consumed,
+void P2pProxySession::ProcessData(size_t received) {
+    const FrameStatus status = m_rx.Commit(received,
         [this](const ryu_ldn::protocol::LdnHeader& header, const uint8_t* payload, size_t len) {
             DispatchFrame(header, payload, len);
             return m_connected.load();
@@ -2045,10 +2040,8 @@ void P2pProxySession::ProcessData(const uint8_t* data, size_t size) {
     if (status == FrameStatus::Invalid) {
         LOG_WARN("P2P session: invalid frame header, disconnecting");
         Disconnect(false);
-        return;
-    }
-    if (consumed < size && m_connected) {
-        LOG_WARN("P2P session: incomplete packet dropped (%zu bytes)", size - consumed);
+    } else if (status == FrameStatus::Oversized) {
+        LOG_WARN("P2P session: dropping frame larger than %zu bytes", P2P_MAX_FRAME_SIZE);
     }
 }
 
