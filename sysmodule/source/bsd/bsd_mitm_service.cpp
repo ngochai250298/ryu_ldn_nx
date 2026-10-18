@@ -53,7 +53,7 @@
 #include "../debug/log.hpp"
 #include "../ldn/ldn_shared_state.hpp"
 #include "../config/game_whitelist.hpp"
-#include "../config/config_ipc_service.hpp"
+#include "../ldn/ldn_route.hpp"
 
 // Atmosphere MITM dispatch macros for IPC forwarding
 #include <stratosphere/sf/sf_mitm_dispatch.h>
@@ -296,11 +296,17 @@ BsdMitmService::~BsdMitmService() {
  * ## Strategy
  *
  * We intercept BSD sessions from applications that are in the LDN
- * game whitelist (fetched from Ryujinx server at startup), while
- * [ldn] enabled is set. System processes are never intercepted.
+ * game whitelist (fetched from Ryujinx server at startup), unless the
+ * real-wireless button was held when the game was launched. System
+ * processes are never intercepted.
+ *
+ * Only launch-fixed inputs gate this: bsd:u is opened at boot, while
+ * relay vs real radio is decided later, per Local Wireless session, in
+ * CreateUserLocalCommunicationService. Bind() stops proxying a process
+ * whose session went to the real radio (SharedState::IsRealWirelessPid).
  *
  * @param client_info Process information (PID, program ID, etc.)
- * @return true For games in the whitelist when LDN is enabled, false otherwise
+ * @return true For games in the whitelist, false otherwise
  */
 bool BsdMitmService::ShouldMitm(const sm::MitmProcessInfo& client_info) {
     // Static counter to track all ShouldMitm calls for debugging
@@ -329,13 +335,13 @@ bool BsdMitmService::ShouldMitm(const sm::MitmProcessInfo& client_info) {
         return false;
     }
 
-    // LDN emulation disabled: leave the game's sockets untouched
-    if (!ryu_ldn::ipc::IsLdnEnabled()) {
-        LOG_INFO("BSD ShouldMitm #%u: SKIP (LDN disabled)", call_id);
+    // Real-wireless button held at launch: leave the game's sockets untouched
+    if (ryu_ldn::ldn::HeldRealWirelessKey(client_info.override_status.GetKeysHeld())) {
+        LOG_INFO("BSD ShouldMitm #%u: SKIP (real wireless button held at launch)", call_id);
         return false;
     }
 
-    // Is this game in the LDN whitelist?
+    // First check: is this game in the LDN whitelist?
     LOG_INFO("BSD ShouldMitm #%u: checking whitelist for 0x%016lx...", call_id, program_id);
     bool is_whitelisted = ryu_ldn::config::IsGameInWhitelist(program_id);
     LOG_INFO("BSD ShouldMitm #%u: whitelist result=%s", call_id, is_whitelisted ? "YES" : "NO");
@@ -1121,9 +1127,11 @@ Result BsdMitmService::Bind(
         // Check address family is IPv4
         if (sock_addr_copy.sin_family == static_cast<uint8_t>(ryu_ldn::bsd::AddressFamily::Inet)) {
             // Check if this is an LDN address OR INADDR_ANY (0.0.0.0)
-            // Games often bind to 0.0.0.0 to accept from any interface - we need to proxy these too
+            // Games often bind to 0.0.0.0 to accept from any interface - we need to proxy these too,
+            // unless this process's Local Wireless went to the real radio
             bool is_ldn = sock_addr_copy.IsLdnAddress();
-            bool is_inaddr_any = (sock_addr_copy.sin_addr == 0);
+            bool is_inaddr_any = (sock_addr_copy.sin_addr == 0) &&
+                !ams::mitm::ldn::SharedState::GetInstance().IsRealWirelessPid(m_client_pid);
 
             if (is_ldn || is_inaddr_any) {
                 LOG_INFO("BSD Bind fd=%d detected %s address, port=%u",

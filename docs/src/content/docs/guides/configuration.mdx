@@ -134,10 +134,19 @@ The reconnect system uses a **fast first retry** (200ms for the first attempt on
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `enabled` | `1` | Enable/disable LDN emulation. Read when a game starts; `0` leaves games on real local wireless |
+| `enabled` | `1` | Enable/disable LDN emulation. Read each time a game starts Local Wireless; `0` leaves games on real local wireless |
 | `passphrase` | _(empty)_ | Room passphrase for private rooms (empty = public) |
 | `interface` | _(empty)_ | Parsed but **not used** — always auto-detects network interface |
 | `disable_p2p` | `1` | Disable P2P proxy (0=enable P2P, 1=relay only) |
+
+#### Online or real local wireless
+
+No overlay is needed to choose. Each time a game starts Local Wireless, the sysmodule picks:
+
+- **Online (server)** by default.
+- **Real local wireless** when the console has no network connection, since the server cannot be reached anyway.
+- **Real local wireless** for the whole launch when you **hold ZR while starting the game** (keep holding until the game starts loading, like Atmosphère's hold-R for the homebrew menu). Use this to play with an unmodded Switch in the same room.
+- **Real local wireless** when `enabled = 0`.
 
 Setting `disable_p2p = 1` forces relay mode through the server. This is more reliable for most setups but adds server load. Enable P2P (`disable_p2p = 0`) if UPnP port mapping works on your network — it allows direct peer connections and reduces latency.
 

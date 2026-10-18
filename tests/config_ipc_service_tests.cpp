@@ -64,6 +64,8 @@
 #include <cstdint>
 #include <array>
 
+#include "ldn/ldn_route.hpp"
+
 //=============================================================================
 // Mock Switch/libnx types for testing
 //=============================================================================
@@ -371,10 +373,12 @@ bool IsLdnEnabled() {
 }
 
 /**
- * @brief Mirrors LdnMitMService::ShouldMitm (ldn:u)
+ * @brief Mirrors LdnMitMService::CreateUserLocalCommunicationService's route
+ *
+ * true = our relay-backed service, false = forward to the real ldn:u.
  */
-bool LdnShouldMitm() {
-    return IsLdnEnabled();
+bool LdnUsesRelay(bool online, u64 keys_held_at_launch) {
+    return ryu_ldn::ldn::UseRelay(IsLdnEnabled(), online, keys_held_at_launch);
 }
 
 /**
@@ -382,10 +386,10 @@ bool LdnShouldMitm() {
  *
  * The per-PID dummy-session skip that follows these checks is not modelled.
  */
-bool BsdShouldMitm(u64 program_id, bool whitelisted) {
+bool BsdShouldMitm(u64 program_id, bool whitelisted, u64 keys_held_at_launch = 0) {
     if (program_id == 0x4200000000000010ULL) return false;  // our sysmodule
     if (program_id < 0x0100000000000000ULL) return false;   // system process
-    if (!IsLdnEnabled()) return false;
+    if (ryu_ldn::ldn::HeldRealWirelessKey(keys_held_at_launch)) return false;
     return whitelisted;
 }
 
@@ -781,46 +785,72 @@ TEST(ldn_enabled_set_get_roundtrip) {
 
 
 //=============================================================================
-// ShouldMitm Gate Tests ([ldn] enabled)
+// Route and ShouldMitm Gate Tests ([ldn] enabled, offline, launch button)
 //=============================================================================
 
 static constexpr u64 kGameProgramId = 0x0100152000022000ULL;
 static constexpr u64 kSysmoduleProgramId = 0x0100000000000006ULL;  // usb, not whitelisted
 
+static constexpr u64 kZr = 1ULL << 9;  // HidNpadButton_ZR
+static constexpr u64 kR = 1ULL << 7;   // HidNpadButton_R (Atmosphere's hbmenu key)
+
 /**
- * @test ldn:u ShouldMitm reads the current value on every service open
+ * @test ldn:u route reads [ldn] enabled each time Local Wireless starts
  */
-TEST(ldn_should_mitm_follows_enabled) {
+TEST(ldn_route_follows_enabled) {
     mock::MockConfigService svc;
 
-    ASSERT_TRUE(mock::LdnShouldMitm());  // default enabled = 1
+    ASSERT_TRUE(mock::LdnUsesRelay(true, 0));  // default enabled = 1
 
     svc.SetLdnEnabled(0);
-    ASSERT_FALSE(mock::LdnShouldMitm());
+    ASSERT_FALSE(mock::LdnUsesRelay(true, 0));
 
     svc.SetLdnEnabled(1);
-    ASSERT_TRUE(mock::LdnShouldMitm());
+    ASSERT_TRUE(mock::LdnUsesRelay(true, 0));
 }
 
 /**
- * @test bsd:u ShouldMitm leaves a whitelisted game alone when disabled
+ * @test Offline console gets the real radio
  */
-TEST(bsd_should_mitm_skips_game_when_disabled) {
-    mock::MockConfigService svc;
-
-    svc.SetLdnEnabled(0);
-    ASSERT_FALSE(mock::BsdShouldMitm(kGameProgramId, true));
-}
-
-/**
- * @test bsd:u ShouldMitm behaviour is unchanged when enabled
- */
-TEST(bsd_should_mitm_unchanged_when_enabled) {
+TEST(ldn_route_offline_is_real_wireless) {
     mock::MockConfigService svc;
 
     svc.SetLdnEnabled(1);
-    ASSERT_TRUE(mock::BsdShouldMitm(kGameProgramId, true));
-    ASSERT_FALSE(mock::BsdShouldMitm(kGameProgramId, false));
+    ASSERT_FALSE(mock::LdnUsesRelay(false, 0));
+}
+
+/**
+ * @test ZR held at launch gives the real radio; other buttons do not
+ */
+TEST(ldn_route_launch_button) {
+    mock::MockConfigService svc;
+
+    svc.SetLdnEnabled(1);
+    ASSERT_FALSE(mock::LdnUsesRelay(true, kZr));
+    ASSERT_FALSE(mock::LdnUsesRelay(true, kZr | kR));
+    ASSERT_TRUE(mock::LdnUsesRelay(true, kR));
+}
+
+/**
+ * @test bsd:u is intercepted whatever [ldn] enabled says, so turning it on
+ *       mid-game still has bsd:u in place for the relay session
+ */
+TEST(bsd_should_mitm_ignores_enabled) {
+    mock::MockConfigService svc;
+
+    for (u32 enabled = 0; enabled <= 1; enabled++) {
+        svc.SetLdnEnabled(enabled);
+        ASSERT_TRUE(mock::BsdShouldMitm(kGameProgramId, true));
+        ASSERT_FALSE(mock::BsdShouldMitm(kGameProgramId, false));
+    }
+}
+
+/**
+ * @test ZR held at launch leaves both ldn:u and bsd:u to the real services
+ */
+TEST(launch_button_skips_bsd_and_ldn_together) {
+    ASSERT_FALSE(mock::BsdShouldMitm(kGameProgramId, true, kZr));
+    ASSERT_FALSE(mock::LdnUsesRelay(true, kZr));
 }
 
 /**
@@ -1005,10 +1035,12 @@ int main() {
     RUN_TEST(ldn_enabled_set_get_roundtrip);
     RUN_TEST(boolean_nonzero_is_true);
 
-    printf("\n--- ShouldMitm Gate Tests ---\n");
-    RUN_TEST(ldn_should_mitm_follows_enabled);
-    RUN_TEST(bsd_should_mitm_skips_game_when_disabled);
-    RUN_TEST(bsd_should_mitm_unchanged_when_enabled);
+    printf("\n--- Route and ShouldMitm Gate Tests ---\n");
+    RUN_TEST(ldn_route_follows_enabled);
+    RUN_TEST(ldn_route_offline_is_real_wireless);
+    RUN_TEST(ldn_route_launch_button);
+    RUN_TEST(bsd_should_mitm_ignores_enabled);
+    RUN_TEST(launch_button_skips_bsd_and_ldn_together);
     RUN_TEST(bsd_should_mitm_never_intercepts_system);
 
     printf("\n--- Debug Level Tests ---\n");
