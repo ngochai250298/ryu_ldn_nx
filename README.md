@@ -64,9 +64,12 @@ Create `sdmc:/config/ryu_ldn_nx/config.ini` (or let the sysmodule auto-create it
 
 ```ini
 [server]
-host = ryuldnnx.ddns.net    ; IP address or hostname
-port = 30456
-use_tls = 0                      ; NOT IMPLEMENTED — no TLS code exists
+host = relay.example.com         ; relay hostname (empty = do not connect)
+port = 443
+transport = wss                  ; required: TLS WebSocket, plain TCP is refused
+console_id = living-room         ; a-z, 0-9, '-' (1-32 characters)
+token =                          ; 64 hex characters, one per console
+ca_file = sdmc:/config/ryu_ldn_nx/ca.pem
 
 [network]
 connect_timeout = 5000

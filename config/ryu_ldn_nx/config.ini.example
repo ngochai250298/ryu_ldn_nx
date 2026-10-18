@@ -3,10 +3,21 @@
 ; Edit this file to customize settings
 
 [server]
-; Server hostname or IP address
-host = ryuldnnx.ddns.net
+; Relay hostname (empty = do not connect)
+host =
 ; Server port
-port = 30456
+port = 443
+; Secure WebSocket transport (plain TCP is refused)
+transport = wss
+; WebSocket path on the relay
+path = /ldn
+; Console id sent as X-Console-Id (a-z, 0-9, '-', 1-32 characters)
+console_id =
+; Secret: 64 hex characters, one per console. Never share it.
+token =
+; Trust anchors (PEM, at most 64 KB) used to verify the relay certificate
+ca_file = sdmc:/config/ryu_ldn_nx/ca.pem
+; WARNING: transport = wss keeps disable_p2p = 1 (P2P cannot be enabled)
 
 [ldn]
 ; Enable LDN emulation (0/1/true/false/yes/no)

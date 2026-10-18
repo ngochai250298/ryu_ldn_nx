@@ -32,7 +32,7 @@
  *
  * ## Supported Sections
  *
- * - `[server]`: Server hostname and port
+ * - `[server]`: Server hostname, port and secure WebSocket settings
  * - `[ldn]`: LDN enable/disable, passphrase
  * - `[debug]`: Logging configuration
  *
@@ -86,6 +86,22 @@ constexpr size_t MAX_HOST_LENGTH = 128;
  */
 constexpr size_t MAX_PASSPHRASE_LENGTH = 64;
 
+/** @brief Maximum length of the WebSocket upgrade path (excluding null terminator) */
+constexpr size_t MAX_PATH_LENGTH = 64;
+
+/**
+ * @brief Maximum length of the console ID sent as X-Console-Id
+ *
+ * The relay accepts 1..32 characters from [a-z0-9-].
+ */
+constexpr size_t MAX_CONSOLE_ID_LENGTH = 32;
+
+/** @brief Exact length of the per-console relay token (lowercase hex of 32 random bytes) */
+constexpr size_t TOKEN_LENGTH = 64;
+
+/** @brief Maximum length of the CA bundle path (excluding null terminator) */
+constexpr size_t MAX_CA_FILE_LENGTH = 128;
+
 /**
  * @brief Default configuration file path on SD card
  *
@@ -110,11 +126,34 @@ constexpr const char* LOG_PATH = "sdmc:/config/ryu_ldn_nx/ryu_ldn_nx.log";
 // Default Values - Server
 // -----------------------------------------------------------------------------
 
-/** @brief Default server hostname (Temporary private RyuLDN server for development and testing) */
-constexpr const char* DEFAULT_HOST = "ryuldnnx.ddns.net";
+/**
+ * @brief Default server hostname
+ *
+ * Empty on purpose: the client refuses to connect until a relay host is
+ * configured, so a missing or broken config never sends the console to a
+ * third-party server.
+ */
+constexpr const char* DEFAULT_HOST = "";
 
-/** @brief Default server port */
-constexpr uint16_t DEFAULT_PORT = 30456;
+/** @brief Default server port (HTTPS) */
+constexpr uint16_t DEFAULT_PORT = 443;
+
+/**
+ * @brief Relay transport, selected by `[server] transport`
+ */
+enum class Transport : uint8_t {
+    None,   ///< Key missing, empty or unknown: refuse to connect
+    Wss     ///< `wss`: RyuLdn over a TLS 1.2+ WebSocket
+};
+
+/** @brief Default transport: none, so a config without `transport = wss` never connects */
+constexpr Transport DEFAULT_TRANSPORT = Transport::None;
+
+/** @brief Default WebSocket upgrade path on the relay */
+constexpr const char* DEFAULT_PATH = "/ldn";
+
+/** @brief Default CA bundle used to verify the relay certificate */
+constexpr const char* DEFAULT_CA_FILE = "sdmc:/config/ryu_ldn_nx/ca.pem";
 
 // -----------------------------------------------------------------------------
 // Default Values - LDN
@@ -166,10 +205,24 @@ enum class ConfigResult {
  * ## INI Keys
  * - `host`: Server hostname or IP address
  * - `port`: Server port number
+ * - `transport`: `wss` (TLS 1.2+ WebSocket); missing or any other value refuses to connect
+ * - `path`: WebSocket upgrade path (e.g. /ldn)
+ * - `console_id`: Console ID sent as X-Console-Id ([a-z0-9-], 1..32 chars)
+ * - `token`: Per-console relay token, exactly 64 hex characters
+ * - `ca_file`: PEM CA bundle used to verify the relay certificate
+ *
+ * An invalid `console_id` or `token` is rejected at load time (left empty),
+ * which makes the client refuse to connect. The token is a secret: it must
+ * never be logged or exposed over ryu:cfg.
  */
 struct ServerConfig {
-    char host[MAX_HOST_LENGTH + 1];  ///< Server hostname/IP (null-terminated)
-    uint16_t port;                    ///< Server port number
+    char host[MAX_HOST_LENGTH + 1];                ///< Server hostname/IP (null-terminated)
+    uint16_t port;                                  ///< Server port number
+    Transport transport;                            ///< Relay transport (None = refuse)
+    char path[MAX_PATH_LENGTH + 1];                 ///< WebSocket upgrade path
+    char console_id[MAX_CONSOLE_ID_LENGTH + 1];     ///< X-Console-Id value
+    char token[TOKEN_LENGTH + 1];                   ///< Bearer token (lowercase hex, secret)
+    char ca_file[MAX_CA_FILE_LENGTH + 1];           ///< CA bundle path
 };
 
 /**
@@ -242,8 +295,12 @@ struct Config {
  * @return Config struct with default values on production release
  *
  * ## Default Values
- * - server.host: "ryuldnnx.ddns.net"
- * - server.port: 30456
+ * - server.host: "" (refuse to connect until configured)
+ * - server.port: 443
+ * - server.transport: None (must be set to `wss`)
+ * - server.path: "/ldn"
+ * - server.console_id / server.token: "" (must be configured)
+ * - server.ca_file: "sdmc:/config/ryu_ldn_nx/ca.pem"
  * - ldn.enabled: true
  * - ldn.passphrase: "" (empty)
  * - ldn.use_passphrase: false (public rooms)
