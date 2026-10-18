@@ -589,8 +589,12 @@ Result ICommunicationService::Finalize() {
     // Clear client info
     m_client_process_id = 0;
 
-    // Clear network state
-    std::memset(&m_network_info, 0, sizeof(m_network_info));
+    // Clear network state (the receive thread may still be delivering)
+    {
+        std::scoped_lock lock(m_shared_mutex);
+        std::memset(&m_network_info, 0, sizeof(m_network_info));
+        std::memset(m_prev_node_connected, 0, sizeof(m_prev_node_connected));
+    }
     m_ipv4_address = 0;
     m_subnet_mask = 0;
     m_expected_scene_id = 0;
@@ -685,14 +689,12 @@ Result ICommunicationService::GetNetworkInfoLatestUpdate(
     ams::sf::Out<NetworkInfo> buffer,
     ams::sf::OutArray<NodeLatestUpdate> pUpdates)
 {
+    // Info and node updates come from one locked view; m_prev_node_connected
+    // is also cleared by the receive thread when we leave a room.
+    std::scoped_lock lock(m_shared_mutex);
     LOG_INFO("GetNetworkInfoLatestUpdate() called, node_count=%u, update_buf_size=%zu",
              m_network_info.ldn.nodeCount, pUpdates.GetSize());
-
-    // Snapshot m_network_info under the shared mutex
-    {
-        std::scoped_lock lock(m_shared_mutex);
-        buffer.SetValue(m_network_info);
-    }
+    buffer.SetValue(m_network_info);
 
     // Report node state changes since last call
     if (pUpdates.GetSize() > 0) {
@@ -781,8 +783,11 @@ Result ICommunicationService::Scan(
     }
 
     // Reset scan results buffer and events (like Ryujinx _availableGames.Clear() and _scan.Reset())
-    m_scan_result_count = 0;
-    std::memset(m_scan_results, 0, sizeof(m_scan_results));
+    {
+        std::scoped_lock lock(m_shared_mutex);
+        m_scan_result_count = 0;
+        std::memset(m_scan_results, 0, sizeof(m_scan_results));
+    }
     m_scan_event.Clear();
     m_error_event.Clear();
 
@@ -871,14 +876,13 @@ Result ICommunicationService::Scan(
     }
 
     // Copy results to output buffer
-    size_t result_count = m_scan_result_count;
-    size_t max_results = buffer.GetSize();
-    if (result_count > max_results) {
-        result_count = max_results;
-    }
-
-    for (size_t i = 0; i < result_count; i++) {
-        buffer[i] = m_scan_results[i];
+    size_t result_count;
+    {
+        std::scoped_lock lock(m_shared_mutex);
+        result_count = std::min(m_scan_result_count, buffer.GetSize());
+        for (size_t i = 0; i < result_count; i++) {
+            buffer[i] = m_scan_results[i];
+        }
     }
 
     count.SetValue(static_cast<u32>(result_count));
@@ -926,15 +930,13 @@ Result ICommunicationService::CloseAccessPoint() {
     // Stop P2P server if running (host cleanup)
     StopP2pProxyServer();
 
-    // Disconnect from server
+    // Leave the room (clears the network info under the lock), then the link
+    LeaveNetwork();
     DisconnectFromServer();
 
     auto result = m_state_machine.CloseAccessPoint();
     R_UNLESS(result == StateTransitionResult::Success, LdnResult(helpers::desc::InvalidState));
 
-    // Clear network info
-    std::memset(&m_network_info, 0, sizeof(m_network_info));
-    m_network_connected = false;
     m_expected_scene_id = 0;
 
     // Update shared state
@@ -1146,8 +1148,8 @@ Result ICommunicationService::CreateNetwork(const CreateNetworkConfig &data) {
                  kPredictedHostIp);
     }
 
-    // Mark as connected to network and disable inactivity timeout (like Ryujinx)
-    m_network_connected = true;
+    // HandleConnectedPacket already set m_network_connected under the lock;
+    // setting it here could undo a Disconnect that arrived since.
     m_inactivity_timeout.DisableTimeout();
 
     // Update shared state
@@ -1353,8 +1355,8 @@ Result ICommunicationService::Connect(const ConnectNetworkData &dat, const Netwo
 
     LOG_INFO("Connect: received Connected response, connected to network");
 
-    // Mark as connected to network and disable inactivity timeout (like Ryujinx)
-    m_network_connected = true;
+    // HandleConnectedPacket already set m_network_connected under the lock;
+    // setting it here could undo a Disconnect that arrived since.
     m_inactivity_timeout.DisableTimeout();
 
     // Note: m_network_info is already set by the Connected packet handler
@@ -1701,6 +1703,7 @@ void ICommunicationService::HandleServerPacket(ryu_ldn::protocol::PacketId id, c
             }
             m_network_connected = false;
             std::memset(&m_network_info, 0, sizeof(m_network_info));
+            std::memset(m_prev_node_connected, 0, sizeof(m_prev_node_connected));
 
             const CommState state = m_state_machine.GetState();
             const bool is_host = (state == CommState::AccessPointCreated);
@@ -1894,6 +1897,7 @@ void ICommunicationService::HandleConnectedPacket(const uint8_t* data, size_t si
 
         // Copy to our local NetworkInfo (layout is compatible)
         std::memcpy(&m_network_info, net_info, sizeof(m_network_info));
+        helpers::ClampNetworkInfo(m_network_info);
 
         // NOTE: Keep node IPs in Ryujinx format (big-endian uint32, e.g., 10.114.0.1 = 0x0A720001).
         // GetIpv4Address() returns proxy_ip in Ryujinx format, so NetworkInfo nodes must
@@ -2020,6 +2024,7 @@ void ICommunicationService::HandleSyncNetworkPacket(const uint8_t* data, size_t 
                  static_cast<void*>(&m_network_info));
         ryu_ldn::debug::g_logger.flush();
         std::memcpy(&m_network_info, net_info, sizeof(m_network_info));
+        helpers::ClampNetworkInfo(m_network_info);
         LOG_INFO("SyncNetwork step2: memcpy done, node_count=%u, max=%u",
                  m_network_info.ldn.nodeCount,
                  m_network_info.ldn.nodeCountMax);
@@ -2250,6 +2255,7 @@ void ICommunicationService::HandleScanReplyPacket(const uint8_t* data, size_t si
         if (m_scan_result_count < MAX_SCAN_RESULTS) {
             const auto* net_info = reinterpret_cast<const ryu_ldn::protocol::NetworkInfo*>(data);
             std::memcpy(&m_scan_results[m_scan_result_count], net_info, sizeof(NetworkInfo));
+            helpers::ClampNetworkInfo(m_scan_results[m_scan_result_count]);
 
             // Fix sceneId and localCommunicationId in scan results (Ryujinx compatibility)
             // Ryujinx creates networks with sceneId=0, but the game expects its own sceneId
@@ -2297,6 +2303,7 @@ void ICommunicationService::LeaveNetwork() {
         was_connected = m_network_connected;
         m_network_connected = false;
         std::memset(&m_network_info, 0, sizeof(m_network_info));
+        std::memset(m_prev_node_connected, 0, sizeof(m_prev_node_connected));
     }
     if (!was_connected) {
         return;

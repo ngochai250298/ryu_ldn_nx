@@ -205,6 +205,39 @@ static void connect_failure_maps_server_network_error() {
     ASSERT_TRUE(ConnectFailureDescription(-1)  == d::DeviceNotAvailable);  // Unknown
 }
 
+// Stand-in with the field types of ldn_types.hpp NetworkInfo.ldn (that
+// header needs the Switch SDK); ClampNetworkInfo itself is the real code.
+struct FakeNetworkInfo {
+    struct {
+        uint8_t nodeCountMax;
+        uint8_t nodeCount;
+        struct { uint32_t ip; } nodes[8];
+        uint16_t advertiseDataSize;
+        uint8_t advertiseData[384];
+    } ldn;
+};
+
+static void clamp_network_info_bounds_server_counts() {
+    using ams::mitm::ldn::helpers::ClampNetworkInfo;
+    FakeNetworkInfo bad{};
+    bad.ldn.nodeCountMax = 200;
+    bad.ldn.nodeCount = 255;
+    bad.ldn.advertiseDataSize = 0xFFFF;
+    ClampNetworkInfo(bad);
+    ASSERT_TRUE(bad.ldn.advertiseDataSize == 384);
+    ASSERT_TRUE(bad.ldn.nodeCountMax == 8);
+    ASSERT_TRUE(bad.ldn.nodeCount == 8);
+
+    FakeNetworkInfo small{};
+    small.ldn.nodeCountMax = 4;
+    small.ldn.nodeCount = 6;
+    small.ldn.advertiseDataSize = 100;
+    ClampNetworkInfo(small);
+    ASSERT_TRUE(small.ldn.nodeCount == 4);  // never above the room's own max
+    ASSERT_TRUE(small.ldn.nodeCountMax == 4);
+    ASSERT_TRUE(small.ldn.advertiseDataSize == 100);
+}
+
 int main() {
     printf("\n========================================\n");
     printf("  LDN Service Tests - ryu_ldn_nx\n");
@@ -217,6 +250,7 @@ int main() {
     RUN(receive_stack_pool_gives_each_instance_its_own_stack);
     RUN(ldn_result_descriptions_match_ryujinx);
     RUN(connect_failure_maps_server_network_error);
+    RUN(clamp_network_info_bounds_server_counts);
 
     printf("\n========================================\n");
     printf("  Results: %d/%d passed\n", g_tests_passed, g_tests_passed + g_tests_failed);

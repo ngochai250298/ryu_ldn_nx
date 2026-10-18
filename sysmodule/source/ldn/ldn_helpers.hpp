@@ -112,4 +112,25 @@ private:
     std::atomic<bool> m_in_use[Slots] = {};
 };
 
+/**
+ * @brief Clamp the counts in a NetworkInfo taken from the wire
+ *
+ * The game copies advertiseDataSize bytes and walks nodeCount nodes; a bad
+ * server value would make it overread its own buffer.
+ */
+template <typename Info>
+void ClampNetworkInfo(Info& info) {
+    constexpr size_t kAdvertiseMax = sizeof(info.ldn.advertiseData);
+    constexpr size_t kNodesMax = sizeof(info.ldn.nodes) / sizeof(info.ldn.nodes[0]);
+    if (info.ldn.advertiseDataSize > kAdvertiseMax) {
+        info.ldn.advertiseDataSize = kAdvertiseMax;
+    }
+    if (info.ldn.nodeCountMax > kNodesMax) {
+        info.ldn.nodeCountMax = kNodesMax;
+    }
+    if (info.ldn.nodeCount > info.ldn.nodeCountMax) {
+        info.ldn.nodeCount = info.ldn.nodeCountMax;
+    }
+}
+
 } // namespace ams::mitm::ldn::helpers
