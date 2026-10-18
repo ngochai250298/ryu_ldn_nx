@@ -340,6 +340,19 @@ Config get_default_config();
 ConfigResult load_config(const char* path, Config& config);
 
 /**
+ * @brief Return and reset the count of invalid values seen by load_config
+ *
+ * Config loading runs before the logger exists, so callers log this after
+ * the fact. Booleans must be true/false/1/0; anything else keeps the
+ * default and counts here.
+ *
+ * @param first Optional buffer receiving a description of the first problem
+ * @param first_size Size of @p first
+ * @return Number of invalid values since the last call
+ */
+uint32_t take_config_warnings(char* first, size_t first_size);
+
+/**
  * @brief Save configuration to INI file
  *
  * Writes the config structure to an INI file.

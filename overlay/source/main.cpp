@@ -12,6 +12,7 @@
 #define TESLA_INIT_IMPL
 #include <tesla.hpp>
 #include "ryu_ldn_ipc.h"
+#include "app/config_actions.hpp"
 #include "app/overlay_state.hpp"
 #include "views/connection/main_dashboard_gui.hpp"
 
@@ -34,11 +35,13 @@ public:
 
     }
     virtual void exitServices() override {
-        if (OverlayState::Instance().GetStatus() == OverlayState::InitStatus::Loaded)
+        if (OverlayState::Instance().GetStatus() == OverlayState::InitStatus::Loaded) {
+            SaveIfDirty();  // closing the overlay must not lose changes
             ryuLdnExit();
+        }
     }
     virtual void onShow() override {}
-    virtual void onHide() override {}
+    virtual void onHide() override { SaveIfDirty(); }
     virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
         return initially<MainDashboardGui>();
     }

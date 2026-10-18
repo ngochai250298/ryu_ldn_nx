@@ -240,6 +240,65 @@ TEST(logger_file_output_enabled) {
     std::remove(log_path);
 }
 
+TEST(logger_rotates_oversized_file) {
+    char log_path[256], old_path[270];
+    snprintf(log_path, sizeof(log_path), "/tmp/test_log_rot_%d.log", rand());
+    snprintf(old_path, sizeof(old_path), "%s.1", log_path);
+    std::remove(old_path);
+    {
+        std::ofstream big(log_path, std::ios::binary);
+        std::string block(4096, 'x');
+        for (size_t i = 0; i * block.size() < MAX_LOG_FILE_SIZE + 4096; i++) big << block;
+    }
+
+    DebugConfig config{};
+    config.enabled = true;
+    config.level = 3;
+    Logger logger;
+    logger.init(config, log_path);
+    logger.log(LogLevel::Info, "after rotation");
+    logger.flush();
+
+    std::ifstream old_f(old_path, std::ios::binary | std::ios::ate);
+    ASSERT_TRUE(old_f.is_open());
+    ASSERT_TRUE(static_cast<size_t>(old_f.tellg()) >= MAX_LOG_FILE_SIZE);
+
+    std::ifstream cur(log_path, std::ios::binary | std::ios::ate);
+    ASSERT_TRUE(cur.is_open());
+    ASSERT_TRUE(static_cast<size_t>(cur.tellg()) < 4096);
+
+    std::remove(log_path);
+    std::remove(old_path);
+}
+
+// Mirrors what SetDebugEnabled/SetDebugLevel/ReloadConfig now call. The IPC
+// handlers themselves need Atmosphere and are not host-testable; this covers
+// the Logger side they rely on.
+TEST(logger_runtime_enable_and_level) {
+    DebugConfig config{};
+    config.enabled = false;
+    config.level = 0;
+    Logger logger;
+    logger.init(config, "/tmp/test_log_runtime_unused.log");
+    ASSERT_FALSE(logger.should_log(LogLevel::Error));
+    logger.SetEnabled(true);
+    ASSERT_TRUE(logger.should_log(LogLevel::Error));
+    ASSERT_FALSE(logger.should_log(LogLevel::Verbose));
+    logger.SetLevel(3);
+    ASSERT_TRUE(logger.should_log(LogLevel::Verbose));
+    std::remove("/tmp/test_log_runtime_unused.log");
+}
+
+TEST(logger_init_clamps_level) {
+    DebugConfig config{};
+    config.enabled = true;
+    config.level = 99;
+    Logger logger;
+    logger.init(config, "/tmp/test_log_clamp_unused.log");
+    ASSERT_TRUE(logger.should_log(LogLevel::Verbose));
+    std::remove("/tmp/test_log_clamp_unused.log");
+}
+
 TEST(logger_file_output_disabled) {
     char log_path[256];
     snprintf(log_path, sizeof(log_path), "/tmp/test_log_disabled_%d.log", rand());

@@ -6,11 +6,17 @@
  */
 
 #include "config/config.hpp"
+#include "config/whitelist_parser.hpp"
+#include "config/ipc_input.hpp"
 
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <string>
+#include <iterator>
+#include <vector>
+#include <algorithm>
 
 using namespace ryu_ldn::config;
 
@@ -531,6 +537,232 @@ TEST(save_config_keeps_relay_keys) {
     ASSERT_STREQ(loaded.server.console_id, "switch-1");
     ASSERT_STREQ(loaded.server.token, config.server.token);
     ASSERT_EQ(loaded.server.port, config.server.port);
+}
+
+static std::string read_all(const char* path) {
+    std::ifstream f(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+// The file written by save_config must contain every key, including port.
+// (Regression: the Switch formatter used to drop `port`; now host tests run
+// that same formatter.)
+TEST(save_config_writes_port_and_relay_keys) {
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/test_save_port_%d.ini", rand());
+    Config config = get_default_config();
+    config.server.port = 4443;
+    ASSERT_EQ(save_config(path, config), ConfigResult::Success);
+    std::string text = read_all(path);
+    std::remove(path);
+    ASSERT_TRUE(text.find("port = 4443\n") != std::string::npos);
+    ASSERT_TRUE(text.find("transport = ") != std::string::npos);
+    ASSERT_TRUE(text.find("path = ") != std::string::npos);
+    ASSERT_TRUE(text.find("console_id = ") != std::string::npos);
+    ASSERT_TRUE(text.find("token = ") != std::string::npos);
+    ASSERT_TRUE(text.find("ca_file = ") != std::string::npos);
+}
+
+// Every config save must write the token back unchanged, repeatedly.
+TEST(save_config_token_round_trip_is_stable) {
+    char content[512];
+    snprintf(content, sizeof(content),
+        "[server]\nhost = relay.example\ntransport = wss\nconsole_id = switch-1\ntoken = %s\n", VALID_TOKEN);
+    TempConfigFile file(content);
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/test_token_rt_%d.ini", rand());
+    ASSERT_EQ(save_config(path, config), ConfigResult::Success);
+    std::string first = read_all(path);
+    for (int i = 0; i < 3; i++) {
+        Config again = get_default_config();
+        ASSERT_EQ(load_config(path, again), ConfigResult::Success);
+        ASSERT_STREQ(again.server.token, config.server.token);
+        ASSERT_EQ(save_config(path, again), ConfigResult::Success);
+    }
+    std::string last = read_all(path);
+    std::remove(path);
+    ASSERT_TRUE(first == last);
+    ASSERT_TRUE(last.find(std::string("token = ") + config.server.token + "\n") != std::string::npos);
+}
+
+// Overwriting an existing file works (the test io_rename refuses to replace,
+// like Horizon fs) and leaves no .tmp behind.
+TEST(save_config_overwrites_existing_without_tmp) {
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/test_save_atomic_%d.ini", rand());
+    Config config = get_default_config();
+    ASSERT_EQ(save_config(path, config), ConfigResult::Success);
+    config.server.port = 1111;
+    ASSERT_EQ(save_config(path, config), ConfigResult::Success);
+
+    Config loaded = get_default_config();
+    ASSERT_EQ(load_config(path, loaded), ConfigResult::Success);
+    ASSERT_EQ(loaded.server.port, 1111);
+
+    char tmp[272];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    std::ifstream t(tmp);
+    ASSERT_FALSE(t.good());
+    std::remove(path);
+}
+
+// Crash between "delete config.ini" and "rename tmp": boot must recover.
+TEST(ensure_config_exists_recovers_tmp) {
+    char path[256], tmp[272];
+    snprintf(path, sizeof(path), "/tmp/test_recover_%d.ini", rand());
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    std::remove(path);
+    { std::ofstream f(tmp); f << "[server]\nhost = recovered.example\nport = 777\n"; }
+
+    ASSERT_EQ(ensure_config_exists(path), ConfigResult::Success);
+    Config loaded = get_default_config();
+    ASSERT_EQ(load_config(path, loaded), ConfigResult::Success);
+    std::remove(path);
+    ASSERT_STREQ(loaded.server.host, "recovered.example");
+    ASSERT_EQ(loaded.server.port, 777);
+    std::ifstream t(tmp);
+    ASSERT_FALSE(t.good());
+}
+
+// A stale .tmp next to a valid config.ini must never win.
+TEST(ensure_config_exists_ignores_tmp_when_config_present) {
+    char path[256], tmp[272];
+    snprintf(path, sizeof(path), "/tmp/test_ignoretmp_%d.ini", rand());
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    { std::ofstream f(path); f << "[server]\nport = 1\n"; }
+    { std::ofstream f(tmp); f << "[server]\nport = 2\n"; }
+    ASSERT_EQ(ensure_config_exists(path), ConfigResult::Success);
+    Config loaded = get_default_config();
+    ASSERT_EQ(load_config(path, loaded), ConfigResult::Success);
+    std::remove(path);
+    std::remove(tmp);
+    ASSERT_EQ(loaded.server.port, 1);
+}
+
+TEST(utf8_bom_does_not_hide_first_section) {
+    TempConfigFile file("\xEF\xBB\xBF[server]\nhost = bom.example\nport = 99\n[ldn]\npassphrase = x\n");
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+    ASSERT_STREQ(config.server.host, "bom.example");
+    ASSERT_EQ(config.server.port, 99);
+    ASSERT_STREQ(config.ldn.passphrase, "x");
+}
+
+TEST(bom_only_skipped_at_file_start) {
+    TempConfigFile file("[server]\nhost = a.example\n\xEF\xBB\xBFport = 5\n");
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+    ASSERT_STREQ(config.server.host, "a.example");
+    ASSERT_EQ(config.server.port, DEFAULT_PORT);  // BOM mid-file is not special
+}
+
+// ---- gamelist.txt scanner (the real WhitelistScanner from the sysmodule) ----
+
+static std::vector<uint64_t> scan_chunks(const std::string& text, size_t chunk) {
+    std::vector<uint64_t> ids;
+    ryu_ldn::config::WhitelistScanner sc;
+    auto emit = [&](uint64_t id) { ids.push_back(id); };
+    for (size_t i = 0; i < text.size(); i += chunk) {
+        sc.Feed(text.data() + i, std::min(chunk, text.size() - i), emit);
+    }
+    sc.Finish(emit);
+    return ids;
+}
+
+TEST(whitelist_bom_indent_and_endings) {
+    std::string text = "\xEF\xBB\xBF" "0x0100152000022000\r\n  0x01006A800016E000\n\t0100000000010000\r"
+                       "# comment\n\n0x0100000000020000";
+    for (size_t chunk : {size_t(1), size_t(3), size_t(512)}) {
+        auto ids = scan_chunks(text, chunk);
+        ASSERT_EQ(ids.size(), 4u);
+        ASSERT_EQ(ids[0], 0x0100152000022000ULL);
+        ASSERT_EQ(ids[1], 0x01006A800016E000ULL);
+        ASSERT_EQ(ids[2], 0x0100000000010000ULL);
+        ASSERT_EQ(ids[3], 0x0100000000020000ULL);
+    }
+}
+
+// 17-byte lines (no 0x) overflowed the old file_size/18 capacity guess; the
+// scanner count is exact, which the loader uses for allocation.
+TEST(whitelist_count_is_exact_for_short_lines) {
+    std::string text;
+    for (int i = 1; i <= 5000; i++) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%016x\n", 0x01000000 + i);
+        text += buf;
+    }
+    ASSERT_EQ(scan_chunks(text, 512).size(), 5000u);
+}
+
+TEST(parse_bool_is_strict) {
+    take_config_warnings(nullptr, 0);
+    TempConfigFile file("[ldn]\nenabled = FALSE\nuse_passphrase = True\ndisable_p2p = 1\n[debug]\nenabled = 0\n");
+    Config config = get_default_config();
+    config.ldn.enabled = true;
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+    ASSERT_EQ(config.ldn.enabled, false);
+    ASSERT_EQ(config.ldn.use_passphrase, true);
+    ASSERT_EQ(config.ldn.disable_p2p, true);
+    ASSERT_EQ(config.debug.enabled, false);
+    ASSERT_EQ(take_config_warnings(nullptr, 0), 0u);
+}
+
+TEST(parse_bool_invalid_keeps_default_and_warns) {
+    take_config_warnings(nullptr, 0);
+    TempConfigFile file("[ldn]\nenabled = off\nuse_passphrase =\ndisable_p2p = yes\n[debug]\nenabled = maybe\n");
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+    Config def = get_default_config();
+    ASSERT_EQ(config.ldn.enabled, def.ldn.enabled);
+    ASSERT_EQ(config.ldn.use_passphrase, def.ldn.use_passphrase);
+    ASSERT_EQ(config.ldn.disable_p2p, def.ldn.disable_p2p);
+    ASSERT_EQ(config.debug.enabled, def.debug.enabled);
+    char first[96];
+    ASSERT_EQ(take_config_warnings(first, sizeof(first)), 4u);
+    ASSERT_TRUE(strstr(first, "ldn.enabled") != nullptr);
+    ASSERT_EQ(take_config_warnings(nullptr, 0), 0u);  // reset
+}
+
+// ---- IPC string copy (real copy_ipc_string used by SetPassphrase/SetServerAddress) ----
+
+TEST(ipc_string_copy_accepts_terminated_printable) {
+    char src[64] = "my room";
+    char dest[65];
+    ASSERT_TRUE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), src, sizeof(src)));
+    ASSERT_STREQ(dest, "my room");
+}
+
+TEST(ipc_string_copy_rejects_unterminated_without_overread) {
+    // Exactly 64 non-NUL bytes: the old strcpy-style copy ran past the array.
+    // Put a guard after the array; copy must not touch it or succeed.
+    struct { char src[64]; char guard[8]; } box;
+    memset(box.src, 'A', sizeof(box.src));
+    memcpy(box.guard, "SECRET!", 8);
+    char dest[65];
+    memset(dest, 'x', sizeof(dest));
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), box.src, sizeof(box.src)));
+    ASSERT_EQ(dest[0], 'x');  // untouched on failure
+}
+
+TEST(ipc_string_copy_rejects_newlines_and_control_chars) {
+    char dest[65];
+    char a[64] = "ok\n[server]\nhost = evil";
+    char b[64] = "tab\there";
+    char c[64] = "cr\rx";
+    char d[64] = "del\x7f";
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), a, sizeof(a)));
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), b, sizeof(b)));
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), c, sizeof(c)));
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(dest, sizeof(dest), d, sizeof(d)));
+}
+
+TEST(ipc_string_copy_rejects_too_long_for_dest) {
+    char src[64] = "0123456789";
+    char small[8];
+    ASSERT_FALSE(ryu_ldn::config::copy_ipc_string(small, sizeof(small), src, sizeof(src)));
 }
 
 // ============================================================================

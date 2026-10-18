@@ -76,6 +76,10 @@ constexpr size_t MAX_LOG_MESSAGE_LENGTH = 256;
 /** @brief Maximum number of messages in the circular log buffer */
 constexpr size_t MAX_LOG_BUFFER_ENTRIES = 64;
 
+/// Log file size cap: above this the file is moved to <log>.1 (replacing any
+/// older .1) and a fresh file is started, so total log use stays under 2x.
+constexpr size_t MAX_LOG_FILE_SIZE = 1024 * 1024;
+
 /** @brief Default log file path on SD card */
 constexpr const char* DEFAULT_LOG_PATH = "sdmc:/config/ryu_ldn_nx/ryu_ldn_nx.log";
 

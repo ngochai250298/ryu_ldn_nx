@@ -55,12 +55,32 @@ enum {
 static RyuLdnConfigService g_ryuCfgService;
 static bool g_ryuCfgInitialized = false;
 
+/// Atmosphere's sm extension HasService (cmd 65100). libnx has no wrapper:
+/// HOS 12+ talks tipc to sm, older firmware cmif.
+static Result ryuLdnHasService(bool* out, SmServiceName name) {
+    if (hosversionAtLeast(12, 0, 0)) {
+        return tipcDispatchInOut(smGetServiceSessionTipc(), 65100, name, *out);
+    }
+    return serviceDispatchInOut(smGetServiceSession(), 65100, name, *out);
+}
+
 Result ryuLdnInitialize(void) {
     if (g_ryuCfgInitialized) {
         return 0;  // Already initialized
     }
 
-    Result rc = smGetService(&g_ryuCfgService.s, "ryu:cfg");
+    // smGetService blocks until the name is registered, so a missing sysmodule
+    // would freeze the overlay. Ask sm first; the caller shows "not running".
+    bool has_service = false;
+    Result rc = ryuLdnHasService(&has_service, smEncodeName("ryu:cfg"));
+    if (R_FAILED(rc)) {
+        return rc;
+    }
+    if (!has_service) {
+        return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+    }
+
+    rc = smGetService(&g_ryuCfgService.s, "ryu:cfg");
     if (R_SUCCEEDED(rc)) {
         g_ryuCfgInitialized = true;
     }

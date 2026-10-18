@@ -38,3 +38,9 @@ inline bool DoReloadConfig() {
     Result rc = ryuLdnReloadConfig(svc, &result);
     return R_SUCCEEDED(rc) && result == RyuLdnConfigResult_Success;
 }
+
+/** @brief Save now if there are unsaved changes (exit / leaving a page). */
+inline bool SaveIfDirty() {
+    if (!OverlayState::Instance().IsDirty()) return true;
+    return DoSaveConfig();
+}
