@@ -12,6 +12,10 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
 namespace ams::mitm::ldn::helpers {
 
 /**
@@ -28,5 +32,37 @@ constexpr Reason ServerDisconnectReason(Reason pending_reject, bool is_host) {
     }
     return is_host ? Reason::DestroyedBySystem : Reason::DestroyedByUser;
 }
+
+/**
+ * @brief Fixed set of thread stacks handed out one per live owner
+ *
+ * Lives in static storage. Claim() is lock-free and safe from any IPC
+ * thread; a slot stays owned until Release(), which the owner calls only
+ * after its thread has been joined.
+ */
+template <size_t Slots, size_t Size, size_t Align>
+class StackPool {
+public:
+    static constexpr size_t StackSize = Size;
+
+    /// @return a free slot index, or -1 when every slot is in use
+    int Claim() {
+        for (size_t i = 0; i < Slots; i++) {
+            bool expected = false;
+            if (m_in_use[i].compare_exchange_strong(expected, true)) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    void Release(int slot) { m_in_use[slot].store(false); }
+
+    void* Stack(int slot) { return m_stacks[slot]; }
+
+private:
+    alignas(Align) uint8_t m_stacks[Slots][Size];
+    std::atomic<bool> m_in_use[Slots] = {};
+};
 
 } // namespace ams::mitm::ldn::helpers

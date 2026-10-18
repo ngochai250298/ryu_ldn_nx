@@ -154,6 +154,27 @@ static void server_disconnect_reason_matches_ryujinx() {
     ASSERT_TRUE(ServerDisconnectReason(Reason::SignalLost, true) == Reason::SignalLost);
 }
 
+// ============================================================================
+// Finding 4: one receive-thread stack per live instance
+// ============================================================================
+
+static void receive_stack_pool_gives_each_instance_its_own_stack() {
+    // Same template and parameters as g_recv_stacks in ldn_icommunication.cpp.
+    static ams::mitm::ldn::helpers::StackPool<2, 0x4000, 0x1000> pool;
+
+    const int a = pool.Claim();   // game A's instance
+    const int b = pool.Claim();   // game B opens ldn:u before A is torn down
+    ASSERT_TRUE(a >= 0 && b >= 0 && a != b);
+    ASSERT_TRUE(pool.Stack(a) != pool.Stack(b));
+    ASSERT_TRUE(reinterpret_cast<uintptr_t>(pool.Stack(a)) % 0x1000 == 0);
+    ASSERT_TRUE(reinterpret_cast<uintptr_t>(pool.Stack(b)) % 0x1000 == 0);
+
+    ASSERT_TRUE(pool.Claim() == -1);  // third concurrent session is refused
+
+    pool.Release(a);                  // A's destructor joined its thread
+    ASSERT_TRUE(pool.Claim() == a);
+}
+
 int main() {
     printf("\n========================================\n");
     printf("  LDN Service Tests - ryu_ldn_nx\n");
@@ -163,6 +184,7 @@ int main() {
     RUN(timeout_reports_expiry_once_without_callback);
     RUN(timeout_not_expired_or_disabled_does_not_fire);
     RUN(server_disconnect_reason_matches_ryujinx);
+    RUN(receive_stack_pool_gives_each_instance_its_own_stack);
 
     printf("\n========================================\n");
     printf("  Results: %d/%d passed\n", g_tests_passed, g_tests_passed + g_tests_failed);

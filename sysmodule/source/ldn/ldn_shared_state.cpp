@@ -36,6 +36,10 @@ void SharedState::Reset() {
 
 void SharedState::SetGameActive(bool active, u64 process_id) {
     std::scoped_lock lk(m_mutex);
+    SetGameActiveLocked(active, process_id);
+}
+
+void SharedState::SetGameActiveLocked(bool active, u64 process_id) {
     m_game_active = active;
     m_process_id = active ? process_id : 0;
 
@@ -76,6 +80,17 @@ u64 SharedState::GetLdnPid() const {
 bool SharedState::IsLdnPid(u64 pid) const {
     std::scoped_lock lk(m_mutex);
     return m_ldn_pid != 0 && m_ldn_pid == pid;
+}
+
+bool SharedState::ReleaseGame(u64 pid) {
+    std::scoped_lock lk(m_mutex);
+    if (m_ldn_pid == pid) {
+        m_ldn_pid = 0;
+    }
+    if (m_process_id == pid) {
+        SetGameActiveLocked(false, 0);
+    }
+    return m_ldn_pid == 0;
 }
 
 // =============================================================================

@@ -31,8 +31,17 @@ namespace ams::mitm::ldn {
 static ICommunicationService* g_active_ldn_service = nullptr;
 static os::Mutex g_active_service_mutex{false};
 
-// Background thread stack - allocated statically to avoid bloating class size
-alignas(os::ThreadStackAlignment) static u8 g_background_thread_stack[0x4000];
+// Receive-thread stacks, one per live instance. They used to share a single
+// static stack, so a second instance (the next game opening ldn:u while the
+// previous one is still being torn down, or a title holding two sessions)
+// ran its thread on the stack the first thread was still using.
+// ponytail: two slots; a third concurrent session is refused with
+// InvalidState. Raise the count if a title ever needs more.
+static helpers::StackPool<2, 0x4000, os::ThreadStackAlignment> g_recv_stacks;
+
+int ICommunicationService::ClaimReceiveStack() {
+    return g_recv_stacks.Claim();
+}
 
 // Async ExternalProxy connect thread stack — see m_p2p_connect_thread comment
 // in the header. The connect+auth+EnsureProxyReady chain takes 1–4 s and used
@@ -136,10 +145,12 @@ static_assert(sizeof(NetworkInfo) == 0x480, "sizeof(NetworkInfo) should be 0x480
 static_assert(sizeof(ConnectNetworkData) == 0x7C, "sizeof(ConnectNetworkData) should be 0x7C");
 static_assert(sizeof(ScanFilter) == 0x60, "sizeof(ScanFilter) should be 0x60");
 
-ICommunicationService::ICommunicationService(ncm::ProgramId program_id)
+ICommunicationService::ICommunicationService(ncm::ProgramId program_id, u64 owner_pid, int stack_slot)
     : m_state_machine()
     , m_error_state(0)
     , m_client_process_id(0)
+    , m_owner_pid(owner_pid)
+    , m_stack_slot(stack_slot)
     , m_network_info{}
     , m_disconnect_reason(DisconnectReason::None)
     , m_pending_reject_reason(DisconnectReason::None)
@@ -222,8 +233,8 @@ ICommunicationService::ICommunicationService(ncm::ProgramId program_id)
         &m_recv_thread,
         ReceiveThreadEntry,
         this,
-        g_background_thread_stack,
-        sizeof(g_background_thread_stack),
+        g_recv_stacks.Stack(m_stack_slot),
+        g_recv_stacks.StackSize,
         16  // Higher priority than before (lower number = higher priority)
             // so receive thread preempts IPC handlers for lower latency
     ));
@@ -270,6 +281,7 @@ ICommunicationService::~ICommunicationService() {
     // Step 3: Join the receive thread (now unblocked, exits quickly)
     os::WaitThread(&m_recv_thread);
     os::DestroyThread(&m_recv_thread);
+    g_recv_stacks.Release(m_stack_slot);
 
     // Wait for any in-flight async P2P connect worker before tearing down
     // m_p2p_client / m_external_proxy_config underneath it.
@@ -306,22 +318,25 @@ ICommunicationService::~ICommunicationService() {
     m_state_machine.Finalize();
 
     // Clear shared state — mark game as inactive and reset LDN PID
-    // so BSD MITM stops intercepting sockets for this process.
+    // so BSD MITM stops intercepting sockets for this process. Only our own
+    // pid: a late destructor must not clear the next game's.
     auto& shared_state = SharedState::GetInstance();
-    shared_state.SetGameActive(false, 0);
-    shared_state.SetLdnPid(0);
-    LOG_INFO("Destructor: cleared LDN PID and game active flag");
+    const bool no_other_game = shared_state.ReleaseGame(m_owner_pid);
+    LOG_INFO("Destructor: released LDN PID %lu (another game live: %d)",
+             m_owner_pid, static_cast<int>(!no_other_game));
 
-    // Ensure ProxySocketManager is fully reset (DisconnectFromServer already
-    // calls Reset() when m_server_connected was true, but if the connection
-    // was already closed, the proxy sockets and callbacks may still be set).
-    // This is idempotent — Reset() clears everything to zero.
-    mitm::bsd::ProxySocketManager::GetInstance().Reset();
+    if (no_other_game) {
+        // Ensure ProxySocketManager is fully reset (DisconnectFromServer
+        // already calls Reset() when this instance was the active one, but
+        // if the connection was already closed, the proxy sockets and
+        // callbacks may still be set). Idempotent. Skipped while another
+        // game owns ldn:u: these are global and hold that game's sockets.
+        mitm::bsd::ProxySocketManager::GetInstance().Reset();
 
-    // Clean up abandoned BSD forward services (same reasoning —
-    // DisconnectFromServer only does this when m_server_connected was true,
-    // but abandoned services accumulate regardless of connection state).
-    mitm::bsd::BsdMitmService::CleanupAbandonedServices();
+        // Clean up abandoned BSD forward services (they accumulate
+        // regardless of connection state).
+        mitm::bsd::BsdMitmService::CleanupAbandonedServices();
+    }
 
     // Clear client info and network state
     m_client_process_id = 0;
@@ -471,20 +486,26 @@ void ICommunicationService::DisconnectFromServer() {
         LOG_INFO("Disconnecting from RyuLdn server");
 
         // Unregister BSD MITM callback
+        bool was_active;
         {
             std::scoped_lock lock(g_active_service_mutex);
-            if (g_active_ldn_service == this) {
+            was_active = (g_active_ldn_service == this);
+            if (was_active) {
                 g_active_ldn_service = nullptr;
             }
         }
 
-        // Reset the ProxySocketManager - clears all sockets, pending packets, callbacks
-        // This prevents memory leaks when the game disconnects and reconnects
-        mitm::bsd::ProxySocketManager::GetInstance().Reset();
+        // The proxy sockets and BSD services are global. If a newer instance
+        // has taken over, they are its, so leave them alone.
+        if (was_active) {
+            // Reset the ProxySocketManager - clears all sockets, pending packets, callbacks
+            // This prevents memory leaks when the game disconnects and reconnects
+            mitm::bsd::ProxySocketManager::GetInstance().Reset();
 
-        // Clean up abandoned BSD forward services (sessions that never got RegisterClient)
-        // This is safe to do now because we're disconnecting from LDN
-        mitm::bsd::BsdMitmService::CleanupAbandonedServices();
+            // Clean up abandoned BSD forward services (sessions that never got RegisterClient)
+            // This is safe to do now because we're disconnecting from LDN
+            mitm::bsd::BsdMitmService::CleanupAbandonedServices();
+        }
 
         m_server_connected = false;
     }
@@ -550,10 +571,9 @@ Result ICommunicationService::Finalize() {
     m_state_machine.Finalize();
 
     // Update shared state - game is no longer active
-    auto& shared_state = SharedState::GetInstance();
-    shared_state.SetGameActive(false, 0);
-    shared_state.SetLdnPid(0);  // Clear so BSD MITM stops intercepting
-    LOG_INFO("Finalize: cleared LDN PID");
+    // Clear so BSD MITM stops intercepting (our pid only; see destructor)
+    SharedState::GetInstance().ReleaseGame(m_owner_pid);
+    LOG_INFO("Finalize: released LDN PID %lu", m_owner_pid);
 
     // Clear client info
     m_client_process_id = 0;

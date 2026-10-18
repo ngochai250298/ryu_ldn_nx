@@ -49,9 +49,22 @@ public:
      * @brief Constructor
      *
      * @param program_id Program ID of the client process (used to replace LocalCommunicationId=-1)
+     * @param owner_pid Process that opened ldn:u (the LdnPid this session owns)
+     * @param stack_slot Receive-thread stack from ClaimReceiveStack(); the
+     *        instance releases it after joining the thread
      */
     /// @gdb{tag="LDN:LIFECYCLE", msg="Communication service created"}
-    explicit ICommunicationService(ncm::ProgramId program_id);
+    ICommunicationService(ncm::ProgramId program_id, u64 owner_pid, int stack_slot);
+
+    /**
+     * @brief Reserve a receive-thread stack for a new instance
+     *
+     * Each live instance needs its own stack: a previous game's instance can
+     * still be shutting down when the next game opens ldn:u.
+     *
+     * @return slot index, or -1 when every stack is in use
+     */
+    static int ClaimReceiveStack();
 
     /**
      * @brief Destructor
@@ -486,6 +499,8 @@ private:
     LdnStateMachine m_state_machine;        ///< Thread-safe state machine
     u64 m_error_state;                      ///< Error state flag
     u64 m_client_process_id;                ///< Client game process ID
+    const u64 m_owner_pid;                  ///< Process that opened ldn:u; only this LdnPid is ours to clear
+    const int m_stack_slot;                 ///< Receive-thread stack slot, released in the destructor
 
     NetworkInfo m_network_info;             ///< Current network info
     DisconnectReason m_disconnect_reason;   ///< Last disconnect reason

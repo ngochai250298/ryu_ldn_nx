@@ -53,7 +53,15 @@ Result LdnMitMService::CreateUserLocalCommunicationService(
     LOG_INFO("Creating UserLocalCommunicationService for program_id=0x%016lx", m_program_id.value);
     // Create our custom communication service with the client's program ID
     // The program_id is used to replace LocalCommunicationId=-1 with the real title ID
-    auto service = sf::CreateSharedObjectEmplaced<ICommunicationInterface, ICommunicationService>(m_program_id);
+    // Each instance runs its receive thread on its own stack; refuse rather
+    // than share one if every stack is still held by a live instance.
+    const int stack_slot = ICommunicationService::ClaimReceiveStack();
+    if (stack_slot < 0) {
+        LOG_ERROR("CreateUserLocalCommunicationService: no free receive stack, refusing session");
+        R_RETURN(MAKERESULT(203, 32)); // LDN InvalidState
+    }
+    auto service = sf::CreateSharedObjectEmplaced<ICommunicationInterface, ICommunicationService>(
+        m_program_id, m_client_pid, stack_slot);
     out.SetValue(std::move(service));
     R_SUCCEED();
 }
