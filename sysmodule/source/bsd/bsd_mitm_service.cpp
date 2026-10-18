@@ -685,14 +685,13 @@ Result BsdMitmService::Bind(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
              (sock_addr.sin_addr >> 16) & 0xFF, (sock_addr.sin_addr >> 24) & 0xFF,
              sock_addr.GetPort());
 
-    const bool is_ldn = sock_addr.IsLdnAddress();
+    auto& manager = ProxySocketManager::GetInstance();
     const bool is_inaddr_any = (sock_addr.sin_addr == 0);
     SocketInfo socket_info;
-    if (!(is_ldn || is_inaddr_any) || !GetSocketInfo(fd, &socket_info)) {
+    if (!rb::IsProxyBind(sock_addr.GetAddr(), manager.GetLocalIp() != 0) || !GetSocketInfo(fd, &socket_info)) {
         R_RETURN(ForwardToRealService());
     }
 
-    auto& manager = ProxySocketManager::GetInstance();
     auto proxy = CreateProxy(manager, fd, socket_info);
     if (proxy == nullptr) {
         LOG_ERROR("[BSD#%u] Bind fd=%d failed to create proxy socket", m_session_id, fd);
@@ -889,7 +888,9 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
         MarkProxy(fd);
     }
 
-    if (!is_proxy) {
+    // Internet destinations use the real socket even on a proxied fd (an
+    // INADDR_ANY proxy is bound on the real side too).
+    if (!is_proxy || (has_dest && !rb::IsProxyDestination(dest.GetAddr()))) {
         R_RETURN(ForwardToRealService());
     }
 

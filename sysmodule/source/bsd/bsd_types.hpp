@@ -64,9 +64,33 @@ inline bool IsLdnAddress(uint32_t ip) {
 }
 
 /**
- * @brief Maximum number of proxy sockets we can manage
+ * @brief Whether a datagram to this destination goes through the LDN proxy
+ *
+ * LDN addresses, plus the broadcasts the server understands: the limited
+ * broadcast and the legacy 192.168.0.255 (HostedGame.RouteMessage maps it
+ * to the subnet broadcast). Anything else is internet traffic and goes to
+ * the real socket.
+ *
+ * @param ip IPv4 address in host byte order
  */
-constexpr size_t MAX_PROXY_SOCKETS = 64;
+inline bool IsProxyDestination(uint32_t ip) {
+    return IsLdnAddress(ip) || ip == 0xFFFFFFFF || ip == 0xC0A800FF;
+}
+
+/**
+ * @brief Whether bind() to this address makes the socket a proxy
+ *
+ * 10.114.x.y always does. 0.0.0.0 does only while an LDN session has a
+ * proxy IP, as Ryujinx only creates proxy sockets while its LDN proxy is
+ * registered; otherwise an online game's INADDR_ANY socket would be cut
+ * off from the internet.
+ *
+ * @param ip Bound IPv4 address in host byte order
+ * @param ldn_active True while the LDN session has a local proxy IP
+ */
+inline bool IsProxyBind(uint32_t ip, bool ldn_active) {
+    return IsLdnAddress(ip) || (ip == 0 && ldn_active);
+}
 
 /**
  * @brief Ephemeral port range start (like Linux)

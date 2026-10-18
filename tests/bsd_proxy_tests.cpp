@@ -441,6 +441,31 @@ TEST(proxy_count_is_capped) {
     m.Reset();
 }
 
+// ============================================================================
+// Which sockets and datagrams are proxied (online play must keep working)
+// ============================================================================
+
+TEST(inaddr_any_bind_is_proxied_only_during_ldn_session) {
+    ASSERT_FALSE(rb::IsProxyBind(0, false));
+    ASSERT_TRUE(rb::IsProxyBind(0, true));
+}
+
+TEST(ldn_bind_is_always_proxied_other_binds_never) {
+    ASSERT_TRUE(rb::IsProxyBind(0x0A720002, false));
+    ASSERT_TRUE(rb::IsProxyBind(0x0A720002, true));
+    ASSERT_FALSE(rb::IsProxyBind(0xC0A80105, true));   // 192.168.1.5
+    ASSERT_FALSE(rb::IsProxyBind(0x7F000001, true));   // 127.0.0.1
+}
+
+TEST(internet_destinations_leave_the_proxy) {
+    ASSERT_TRUE(rb::IsProxyDestination(0x0A720001));   // 10.114.0.1
+    ASSERT_TRUE(rb::IsProxyDestination(0x0A72FFFF));   // 10.114.255.255
+    ASSERT_TRUE(rb::IsProxyDestination(0xFFFFFFFF));   // limited broadcast
+    ASSERT_TRUE(rb::IsProxyDestination(0xC0A800FF));   // legacy 192.168.0.255
+    ASSERT_FALSE(rb::IsProxyDestination(0x08080808));  // 8.8.8.8
+    ASSERT_FALSE(rb::IsProxyDestination(0x0A000001));  // 10.0.0.1 (LAN, not LDN)
+}
+
 TEST(timeval_to_nanoseconds) {
     ASSERT_EQ(rb::TimevalToNanoseconds({1, 500000}), 1500000000LL);
     ASSERT_EQ(rb::TimevalToNanoseconds({0, 0}), 0LL);
