@@ -25,8 +25,9 @@
  *
  * ## Thread Safety
  *
- * The receive queue is protected by a mutex. The receive event can be used
- * to block until data is available (for blocking Recv calls).
+ * The receive queue is protected by a mutex. Blocking Recv/Accept wait on
+ * the receive/accept event for at most PROXY_SOCKET_MAX_BLOCK_MS, and
+ * Close/Shutdown signal the events so any waiter returns at once.
  *
  * ## Lifecycle
  *
@@ -43,6 +44,7 @@
 #pragma once
 
 #include <stratosphere.hpp>
+#include <atomic>
 #include <deque>
 #include <vector>
 #include "bsd_types.hpp"
@@ -70,6 +72,19 @@ constexpr size_t PROXY_SOCKET_MAX_QUEUE_SIZE = 32;
  * (LdnHeader 12 B + ProxyDataHeader 20 B + payload).
  */
 constexpr size_t PROXY_SOCKET_MAX_PAYLOAD = 2000;
+
+/**
+ * @brief Longest a blocking Recv/Accept holds a bsd:u server thread
+ *
+ * A blocking call with nothing queued waits at most this long (or the
+ * socket's SO_RCVTIMEO, if shorter) and then fails with EAGAIN, as a real
+ * socket does when its receive timeout expires.
+ *
+ * ponytail: bounded wait instead of deferring the IPC reply. Long blocking
+ * reads become a 1 s EAGAIN poll; switch to CanDeferInvokeRequest if a game
+ * is found that treats EAGAIN on a blocking socket as fatal.
+ */
+constexpr s64 PROXY_SOCKET_MAX_BLOCK_MS = 1000;
 
 /**
  * @brief State of a proxy socket
@@ -155,12 +170,6 @@ public:
     ProxySocket(const ProxySocket&) = delete;
     ProxySocket& operator=(const ProxySocket&) = delete;
 
-    /**
-     * @brief Move constructor
-     */
-    ProxySocket(ProxySocket&&) = default;
-    ProxySocket& operator=(ProxySocket&&) = default;
-
     // =========================================================================
     // Socket State
     // =========================================================================
@@ -194,6 +203,12 @@ public:
      * @param non_blocking true to enable non-blocking mode
      */
     void SetNonBlocking(bool non_blocking) { m_non_blocking = non_blocking; }
+
+    /**
+     * @brief Set the receive timeout (SO_RCVTIMEO)
+     * @param timeout_ns Timeout in nanoseconds, 0 for none
+     */
+    void SetRecvTimeout(s64 timeout_ns) { m_rcv_timeout_ns = timeout_ns; }
 
     // =========================================================================
     // Address Management
@@ -470,35 +485,9 @@ public:
      */
     size_t GetPendingDataSize() const;
 
-    /**
-     * @brief Wait for data to be available
-     *
-     * Blocks until data is available or timeout expires.
-     *
-     * @param timeout_ms Timeout in milliseconds (0 = infinite)
-     * @return true if data is available, false if timeout
-     */
-    bool WaitForData(u64 timeout_ms);
-
-    /**
-     * @brief Get the receive event handle
-     *
-     * Can be used with poll/select to wait for data.
-     *
-     * @return Reference to the receive event
-     */
-    os::Event& GetReceiveEvent() { return m_receive_event; }
-
 private:
-    /**
-     * @brief Pop the front packet from the receive queue
-     *
-     * @param peek If true, don't remove from queue (MSG_PEEK)
-     * @return The front packet, or empty if queue is empty
-     *
-     * @note Caller must hold m_queue_mutex
-     */
-    ReceivedPacket PopFrontPacket(bool peek);
+    /// How long a blocking call may wait before returning EAGAIN.
+    TimeSpan BlockingWaitLimit() const;
 
     /**
      * @brief Socket type (Stream or Dgram)
@@ -513,18 +502,23 @@ private:
     /**
      * @brief Current socket state
      */
-    ProxySocketState m_state{ProxySocketState::Created};
+    std::atomic<ProxySocketState> m_state{ProxySocketState::Created};
 
     /**
      * @brief Non-blocking mode flag
      */
-    bool m_non_blocking{false};
+    std::atomic<bool> m_non_blocking{false};
+
+    /**
+     * @brief Receive timeout in nanoseconds (SO_RCVTIMEO), 0 for none
+     */
+    std::atomic<s64> m_rcv_timeout_ns{0};
 
     /**
      * @brief Shutdown flags
      */
-    bool m_shutdown_read{false};
-    bool m_shutdown_write{false};
+    std::atomic<bool> m_shutdown_read{false};
+    std::atomic<bool> m_shutdown_write{false};
 
     /**
      * @brief Local address (set by Bind)

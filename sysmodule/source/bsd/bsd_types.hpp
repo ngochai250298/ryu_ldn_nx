@@ -443,6 +443,24 @@ enum class BsdCommand : uint32_t {
 constexpr int32_t MSG_FLAG_PEEK = 0x2;       ///< MSG_PEEK
 constexpr int32_t MSG_FLAG_DONTWAIT = 0x80;  ///< MSG_DONTWAIT
 
+/// socket() type flag: the new socket starts non-blocking (FreeBSD SOCK_NONBLOCK)
+constexpr int32_t SOCK_FLAG_NONBLOCK = 0x20000000;
+/// Mask that strips SOCK_NONBLOCK/SOCK_CLOEXEC from a socket() type
+constexpr int32_t SOCK_TYPE_MASK = 0x0FFFFFFF;
+
+/// 64-bit struct timeval, as passed to SO_RCVTIMEO
+struct Timeval {
+    int64_t tv_sec;
+    int64_t tv_usec;
+};
+static_assert(sizeof(Timeval) == 16, "Timeval must be 16 bytes");
+
+/// SO_RCVTIMEO value in nanoseconds; 0 means no timeout.
+constexpr int64_t TimevalToNanoseconds(const Timeval& tv) {
+    const int64_t ns = tv.tv_sec * 1000000000LL + tv.tv_usec * 1000LL;
+    return ns > 0 ? ns : 0;
+}
+
 // =============================================================================
 // IPC Reply Layout
 // =============================================================================

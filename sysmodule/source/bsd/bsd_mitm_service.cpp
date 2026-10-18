@@ -79,6 +79,8 @@ struct SocketInfo {
     ryu_ldn::bsd::ProtocolType protocol;
     bool is_proxy;  // True if this socket is an LDN proxy socket
     bool broadcast; // SO_BROADCAST option (tracked before proxy creation)
+    bool non_blocking; // O_NONBLOCK / FIONBIO / SOCK_NONBLOCK (tracked before proxy creation)
+    s64 rcv_timeout_ns; // SO_RCVTIMEO, 0 for none (tracked before proxy creation)
     u32 session_id; // Session ID that owns this socket (for cleanup on session close)
 };
 
@@ -556,6 +558,16 @@ void MarkProxy(s32 fd) {
     }
 }
 
+/// Applies a change to the tracked info of fd, if it is tracked.
+template<typename F>
+void UpdateSocketInfo(s32 fd, F update) {
+    std::scoped_lock lock(g_socket_info_mutex);
+    auto it = g_socket_info.find(fd);
+    if (it != g_socket_info.end()) {
+        update(it->second);
+    }
+}
+
 bool GetSocketInfo(s32 fd, SocketInfo* out) {
     std::scoped_lock lock(g_socket_info_mutex);
     auto it = g_socket_info.find(fd);
@@ -564,6 +576,18 @@ bool GetSocketInfo(s32 fd, SocketInfo* out) {
     }
     *out = it->second;
     return true;
+}
+
+/// Creates the proxy for fd and carries over the options the game set on the
+/// socket before it became a proxy (fcntl/ioctl/setsockopt arrive first).
+ProxySocket* CreateProxy(ProxySocketManager& manager, s32 fd, const SocketInfo& info) {
+    ProxySocket* proxy = manager.CreateProxySocket(fd, info.type, info.protocol);
+    if (proxy != nullptr) {
+        proxy->SetBroadcastEnabled(info.broadcast);
+        proxy->SetNonBlocking(info.non_blocking);
+        proxy->SetRecvTimeout(info.rcv_timeout_ns);
+    }
+    return proxy;
 }
 
 rb::ProtocolType DefaultProtocol(s32 type, s32 protocol) {
@@ -593,11 +617,14 @@ Result ForwardSocketCreate(::Service* srv, u32 cmd_id, u32 session_id,
 
     if (out.ret >= 0) {
         std::scoped_lock lock(g_socket_info_mutex);
+        const s32 base_type = type & rb::SOCK_TYPE_MASK;
         g_socket_info[out.ret] = SocketInfo{
-            .type = static_cast<rb::SocketType>(type),
-            .protocol = DefaultProtocol(type, protocol),
+            .type = static_cast<rb::SocketType>(base_type),
+            .protocol = DefaultProtocol(base_type, protocol),
             .is_proxy = false,
             .broadcast = false,
+            .non_blocking = (type & rb::SOCK_FLAG_NONBLOCK) != 0,
+            .rcv_timeout_ns = 0,
             .session_id = session_id,
         };
     }
@@ -666,13 +693,10 @@ Result BsdMitmService::Bind(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
     }
 
     auto& manager = ProxySocketManager::GetInstance();
-    ProxySocket* proxy = manager.CreateProxySocket(fd, socket_info.type, socket_info.protocol);
+    ProxySocket* proxy = CreateProxy(manager, fd, socket_info);
     if (proxy == nullptr) {
         LOG_ERROR("[BSD#%u] Bind fd=%d failed to create proxy socket", m_session_id, fd);
         R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NoMem)));
-    }
-    if (socket_info.broadcast) {
-        proxy->SetBroadcastEnabled(true);
     }
 
     rb::SockAddrIn bind_addr = sock_addr;
@@ -731,7 +755,7 @@ Result BsdMitmService::Connect(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32
     auto& manager = ProxySocketManager::GetInstance();
     ProxySocket* proxy = manager.GetProxySocket(fd);
     if (proxy == nullptr) {
-        proxy = manager.CreateProxySocket(fd, socket_info.type, socket_info.protocol);
+        proxy = CreateProxy(manager, fd, socket_info);
         if (proxy == nullptr) {
             R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NoMem)));
         }
@@ -843,12 +867,9 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
     if (has_dest && dest.IsLdnAddress() && found && !socket_info.is_proxy) {
         is_proxy = true;
         if (manager.GetProxySocket(fd) == nullptr) {
-            ProxySocket* proxy = manager.CreateProxySocket(fd, socket_info.type, socket_info.protocol);
+            ProxySocket* proxy = CreateProxy(manager, fd, socket_info);
             if (proxy == nullptr) {
                 R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NoMem)));
-            }
-            if (socket_info.broadcast) {
-                proxy->SetBroadcastEnabled(true);
             }
             const uint16_t ephemeral = manager.AllocatePort(socket_info.protocol);
             if (ephemeral == 0) {
@@ -1116,42 +1137,47 @@ Result BsdMitmService::Ioctl(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
                              const sf::InAutoSelectBuffer& in3, const sf::InAutoSelectBuffer& in4,
                              sf::OutAutoSelectBuffer out1, sf::OutAutoSelectBuffer out2,
                              sf::OutAutoSelectBuffer out3, sf::OutAutoSelectBuffer out4) {
-    AMS_UNUSED(bufcount, in1, in2, in3, in4, out2, out3, out4);
+    AMS_UNUSED(bufcount, in2, in3, in4, out2, out3, out4);
     m_command_count++;
 
     ProxySocket* proxy = ProxySocketManager::GetInstance().GetProxySocket(fd);
-    if (proxy == nullptr) {
+
+    if (request == static_cast<u32>(rb::IoctlRequest::FioNbio) && in1.GetSize() >= sizeof(s32)) {
+        // Record it for a proxy created later, then let the real fd see it too.
+        s32 value;
+        std::memcpy(&value, in1.GetPointer(), sizeof(value));
+        UpdateSocketInfo(fd, [&](SocketInfo& info) { info.non_blocking = (value != 0); });
+        if (proxy != nullptr) {
+            proxy->SetNonBlocking(value != 0);
+        }
         R_RETURN(ForwardToRealService());
     }
 
-    if (request == static_cast<u32>(rb::IoctlRequest::FioNread)) {
+    if (proxy != nullptr && request == static_cast<u32>(rb::IoctlRequest::FioNread)) {
         const s32 pending = static_cast<s32>(proxy->GetPendingDataSize());
         if (out1.GetSize() >= sizeof(s32)) {
             std::memcpy(out1.GetPointer(), &pending, sizeof(pending));
         }
         R_RETURN(Reply(out_ret, out_errno, 0));
     }
-    R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::Inval)));
+    R_RETURN(ForwardToRealService());
 }
 
 Result BsdMitmService::Fcntl(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 cmd, s32 arg) {
+    AMS_UNUSED(out_ret, out_errno);
     m_command_count++;
 
-    ProxySocket* proxy = ProxySocketManager::GetInstance().GetProxySocket(fd);
-    if (proxy == nullptr) {
-        R_RETURN(ForwardToRealService());
-    }
-
-    constexpr s32 NonBlock = static_cast<s32>(rb::FileStatusFlags::NonBlock);
-    if (cmd == static_cast<s32>(rb::FcntlCommand::GetFl)) {
-        // F_GETFL returns the flags in ret.
-        R_RETURN(Reply(out_ret, out_errno, proxy->IsNonBlocking() ? NonBlock : 0));
-    }
+    // F_SETFL is recorded (for a proxy created later) and applied to an
+    // existing proxy, then forwarded so the real fd keeps the same flags and
+    // F_GETFL can always be answered by the real service.
     if (cmd == static_cast<s32>(rb::FcntlCommand::SetFl)) {
-        proxy->SetNonBlocking((arg & NonBlock) != 0);
-        R_RETURN(Reply(out_ret, out_errno, 0));
+        const bool non_blocking = (arg & static_cast<s32>(rb::FileStatusFlags::NonBlock)) != 0;
+        UpdateSocketInfo(fd, [&](SocketInfo& info) { info.non_blocking = non_blocking; });
+        if (ProxySocket* proxy = ProxySocketManager::GetInstance().GetProxySocket(fd); proxy != nullptr) {
+            proxy->SetNonBlocking(non_blocking);
+        }
     }
-    R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::Inval)));
+    R_RETURN(ForwardToRealService());
 }
 
 Result BsdMitmService::GetSockOpt(sf::Out<s32> out_ret, sf::Out<s32> out_errno, sf::Out<u32> out_optlen,
@@ -1173,29 +1199,36 @@ Result BsdMitmService::SetSockOpt(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
                                   s32 fd, s32 level, s32 optname, const sf::InAutoSelectBuffer& optval) {
     m_command_count++;
 
+    // Remember SO_BROADCAST and SO_RCVTIMEO for a proxy created later by
+    // Bind/Connect/SendTo.
+    if (level == static_cast<s32>(rb::SocketOptionLevel::Socket)) {
+        if (optname == static_cast<s32>(rb::SocketOption::Broadcast) && optval.GetSize() >= sizeof(s32)) {
+            s32 value;
+            std::memcpy(&value, optval.GetPointer(), sizeof(value));
+            UpdateSocketInfo(fd, [&](SocketInfo& info) { info.broadcast = (value != 0); });
+        } else if (optname == static_cast<s32>(rb::SocketOption::RcvTimeo) && optval.GetSize() >= sizeof(rb::Timeval)) {
+            rb::Timeval tv;
+            std::memcpy(&tv, optval.GetPointer(), sizeof(tv));
+            UpdateSocketInfo(fd, [&](SocketInfo& info) { info.rcv_timeout_ns = rb::TimevalToNanoseconds(tv); });
+        }
+    }
+
     ProxySocket* proxy = ProxySocketManager::GetInstance().GetProxySocket(fd);
     if (proxy != nullptr) {
         R_RETURN(Reply(out_ret, out_errno, ErrnoResult(proxy->SetSockOpt(level, optname, optval.GetPointer(), optval.GetSize()))));
-    }
-
-    // Remember SO_BROADCAST for a proxy created later by Bind/Connect/SendTo.
-    if (level == static_cast<s32>(rb::SocketOptionLevel::Socket) &&
-        optname == static_cast<s32>(rb::SocketOption::Broadcast) && optval.GetSize() >= sizeof(s32)) {
-        s32 value;
-        std::memcpy(&value, optval.GetPointer(), sizeof(value));
-        std::scoped_lock lock(g_socket_info_mutex);
-        auto it = g_socket_info.find(fd);
-        if (it != g_socket_info.end()) {
-            it->second.broadcast = (value != 0);
-        }
     }
     R_RETURN(ForwardToRealService());
 }
 
 Result BsdMitmService::Shutdown(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 how) {
-    AMS_UNUSED(out_ret, out_errno, fd, how);
     m_command_count++;
-    R_RETURN(ForwardToRealService());
+
+    // shutdown() is how a game unblocks a receiver, so it must reach the proxy.
+    ProxySocket* proxy = ProxySocketManager::GetInstance().GetProxySocket(fd);
+    if (proxy == nullptr) {
+        R_RETURN(ForwardToRealService());
+    }
+    R_RETURN(Reply(out_ret, out_errno, ErrnoResult(proxy->Shutdown(static_cast<rb::ShutdownHow>(how)))));
 }
 
 /**

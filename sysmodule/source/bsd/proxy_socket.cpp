@@ -114,6 +114,9 @@ Result ProxySocket::Connect(const ryu_ldn::bsd::SockAddrIn& addr) {
             // Blocking connect - wait up to 4 seconds (like Ryujinx)
             bool got_response = m_connect_event.TimedWait(TimeSpan::FromSeconds(4));
 
+            if (m_state == ProxySocketState::Closed) {
+                R_THROW(static_cast<s32>(Errno::BadF));
+            }
             if (!got_response || !m_connect_response_received) {
                 m_state = ProxySocketState::Bound;
                 R_THROW(static_cast<s32>(Errno::TimedOut));
@@ -243,71 +246,67 @@ s32 ProxySocket::Recv(void* buffer, size_t len, s32 flags) {
     return -static_cast<s32>(Errno::NotConn);
 }
 
+TimeSpan ProxySocket::BlockingWaitLimit() const {
+    const s64 cap_ns = TimeSpan::FromMilliSeconds(PROXY_SOCKET_MAX_BLOCK_MS).GetNanoSeconds();
+    const s64 rcv_ns = m_rcv_timeout_ns;
+    return TimeSpan::FromNanoSeconds((rcv_ns > 0 && rcv_ns < cap_ns) ? rcv_ns : cap_ns);
+}
+
 s32 ProxySocket::RecvFrom(void* buffer, size_t len, s32 flags, ryu_ldn::bsd::SockAddrIn* from) {
-    // Check read shutdown
-    if (m_shutdown_read) {
-        return 0; // EOF
-    }
-
-    // Check socket state
-    if (m_state == ProxySocketState::Closed) {
-        return -static_cast<s32>(Errno::BadF);
-    }
-
     // Validate buffer
     if (buffer == nullptr && len > 0) {
         return -static_cast<s32>(Errno::Fault);
     }
 
-    bool peek = (flags & 0x2) != 0; // MSG_PEEK = 0x2
-    bool dontwait = (flags & 0x80) != 0 || m_non_blocking; // MSG_DONTWAIT = 0x80 (Nintendo Switch)
+    const bool peek = (flags & ryu_ldn::bsd::MSG_FLAG_PEEK) != 0;
+    const bool dontwait = (flags & ryu_ldn::bsd::MSG_FLAG_DONTWAIT) != 0 || m_non_blocking;
+    const TimeSpan deadline = os::GetSystemTick().ToTimeSpan() + BlockingWaitLimit();
 
-    // Helper: copy front-of-ring into caller's buffer, pop unless peeking.
-    // Caller must hold m_queue_mutex.
-    auto consume_front = [&](void* out_buf, size_t out_len) -> s32 {
-        const ReceivedPacket& slot = m_rx_ring[m_rx_head];
-        size_t copy_len = std::min(out_len, static_cast<size_t>(slot.len));
-        if (copy_len > 0) {
-            std::memcpy(out_buf, slot.data, copy_len);
-        }
-        if (from != nullptr) {
-            *from = slot.from;
-        }
-        if (!peek) {
-            m_rx_head = (m_rx_head + 1) % PROXY_SOCKET_MAX_QUEUE_SIZE;
-            m_rx_count--;
-        }
-        if (m_rx_count == 0) {
-            m_receive_event.Clear();
-        }
-        return static_cast<s32>(copy_len);
-    };
+    while (true) {
+        {
+            std::scoped_lock lock(m_queue_mutex);
 
-    // Try to get data from queue
-    {
-        std::scoped_lock lock(m_queue_mutex);
+            if (m_state == ProxySocketState::Closed) {
+                return -static_cast<s32>(Errno::BadF);
+            }
+            if (m_shutdown_read) {
+                return 0; // EOF
+            }
 
-        if (m_rx_count == 0) {
+            if (m_rx_count > 0) {
+                const ReceivedPacket& slot = m_rx_ring[m_rx_head];
+                const size_t copy_len = std::min(len, static_cast<size_t>(slot.len));
+                if (copy_len > 0) {
+                    std::memcpy(buffer, slot.data, copy_len);
+                }
+                if (from != nullptr) {
+                    *from = slot.from;
+                }
+                if (!peek) {
+                    m_rx_head = (m_rx_head + 1) % PROXY_SOCKET_MAX_QUEUE_SIZE;
+                    m_rx_count--;
+                }
+                if (m_rx_count == 0) {
+                    m_receive_event.Clear();
+                }
+                return static_cast<s32>(copy_len);
+            }
+
             if (dontwait) {
                 return -static_cast<s32>(Errno::Again);
             }
-        } else {
-            return consume_front(buffer, len);
+
+            // Queue is empty. IncomingData/Shutdown/Close signal under this
+            // lock, so clearing here can't lose a wakeup.
+            m_receive_event.Clear();
         }
-    }
 
-    // Blocking wait for data
-    if (!dontwait) {
-        m_receive_event.Wait();
-
-        std::scoped_lock lock(m_queue_mutex);
-
-        if (m_rx_count > 0) {
-            return consume_front(buffer, len);
+        const TimeSpan now = os::GetSystemTick().ToTimeSpan();
+        if (now >= deadline) {
+            return -static_cast<s32>(Errno::Again);
         }
+        m_receive_event.TimedWait(deadline - now);
     }
-
-    return -static_cast<s32>(Errno::Again);
 }
 
 void ProxySocket::IncomingData(const void* data, size_t len, const ryu_ldn::bsd::SockAddrIn& from) {
@@ -363,20 +362,6 @@ void ProxySocket::IncomingData(const void* data, size_t len, const ryu_ldn::bsd:
     m_receive_event.Signal();
 }
 
-ReceivedPacket ProxySocket::PopFrontPacket(bool peek) {
-    // Caller must hold m_queue_mutex
-    if (m_rx_count == 0) {
-        return {};
-    }
-
-    ReceivedPacket packet = m_rx_ring[m_rx_head];
-    if (!peek) {
-        m_rx_head = (m_rx_head + 1) % PROXY_SOCKET_MAX_QUEUE_SIZE;
-        m_rx_count--;
-    }
-    return packet;
-}
-
 // =============================================================================
 // Socket Options
 // =============================================================================
@@ -404,8 +389,16 @@ Result ProxySocket::SetSockOpt(s32 level, s32 optname, const void* optval, size_
             case ryu_ldn::bsd::SocketOption::RcvBuf:
             case ryu_ldn::bsd::SocketOption::SndLoWat:
             case ryu_ldn::bsd::SocketOption::RcvLoWat:
-            case ryu_ldn::bsd::SocketOption::SndTimeo:
             case ryu_ldn::bsd::SocketOption::RcvTimeo:
+                if (optval != nullptr && optlen >= sizeof(ryu_ldn::bsd::Timeval)) {
+                    ryu_ldn::bsd::Timeval tv;
+                    std::memcpy(&tv, optval, sizeof(tv));
+                    m_rcv_timeout_ns = ryu_ldn::bsd::TimevalToNanoseconds(tv);
+                    R_SUCCEED();
+                }
+                R_THROW(static_cast<s32>(Errno::Inval));
+
+            case ryu_ldn::bsd::SocketOption::SndTimeo:
                 // Accept but ignore these common options
                 R_SUCCEED();
 
@@ -485,60 +478,45 @@ Result ProxySocket::Listen(s32 backlog) {
 }
 
 std::unique_ptr<ProxySocket> ProxySocket::Accept(ryu_ldn::bsd::SockAddrIn* out_addr) {
-    // Must be listening
-    if (m_state != ProxySocketState::Listening) {
-        return nullptr;
-    }
+    const TimeSpan deadline = os::GetSystemTick().ToTimeSpan() + BlockingWaitLimit();
 
-    // Check if non-blocking and no connections available
-    {
-        std::scoped_lock lock(m_queue_mutex);
-        if (m_accept_queue.empty()) {
-            if (m_non_blocking) {
-                // EWOULDBLOCK
+    while (true) {
+        {
+            std::scoped_lock lock(m_queue_mutex);
+
+            // Must be listening (Close moves the state to Closed)
+            if (m_state != ProxySocketState::Listening) {
                 return nullptr;
             }
-        } else {
-            // Connection available - return it
-            auto accepted = std::move(m_accept_queue.front());
-            m_accept_queue.pop_front();
 
-            if (m_accept_queue.empty()) {
-                m_accept_event.Clear();
+            if (!m_accept_queue.empty()) {
+                auto accepted = std::move(m_accept_queue.front());
+                m_accept_queue.pop_front();
+
+                if (m_accept_queue.empty()) {
+                    m_accept_event.Clear();
+                }
+
+                if (out_addr != nullptr) {
+                    *out_addr = accepted->GetRemoteAddr();
+                }
+
+                return accepted;
             }
 
-            if (out_addr != nullptr) {
-                *out_addr = accepted->GetRemoteAddr();
+            if (m_non_blocking) {
+                return nullptr; // EWOULDBLOCK
             }
 
-            return accepted;
+            m_accept_event.Clear();
         }
-    }
 
-    // Blocking wait for connection
-    m_accept_event.Wait();
-
-    // Try again after waking up
-    {
-        std::scoped_lock lock(m_queue_mutex);
-        if (!m_accept_queue.empty()) {
-            auto accepted = std::move(m_accept_queue.front());
-            m_accept_queue.pop_front();
-
-            if (m_accept_queue.empty()) {
-                m_accept_event.Clear();
-            }
-
-            if (out_addr != nullptr) {
-                *out_addr = accepted->GetRemoteAddr();
-            }
-
-            return accepted;
+        const TimeSpan now = os::GetSystemTick().ToTimeSpan();
+        if (now >= deadline) {
+            return nullptr;
         }
+        m_accept_event.TimedWait(deadline - now);
     }
-
-    // No connection (spurious wakeup or shutdown)
-    return nullptr;
 }
 
 void ProxySocket::IncomingConnection(const ryu_ldn::protocol::ProxyConnectRequest& request) {
@@ -603,6 +581,8 @@ bool ProxySocket::HasPendingConnections() const {
 // =============================================================================
 
 Result ProxySocket::Shutdown(ryu_ldn::bsd::ShutdownHow how) {
+    std::scoped_lock lock(m_queue_mutex);
+
     switch (how) {
         case ryu_ldn::bsd::ShutdownHow::Read:
             m_shutdown_read = true;
@@ -618,26 +598,28 @@ Result ProxySocket::Shutdown(ryu_ldn::bsd::ShutdownHow how) {
             R_THROW(static_cast<s32>(Errno::Inval));
     }
 
-    // Signal any blocked receivers
+    // Wake any blocked receiver; it sees the shutdown and returns EOF.
     m_receive_event.Signal();
 
     R_SUCCEED();
 }
 
 Result ProxySocket::Close() {
-    m_state = ProxySocketState::Closed;
-    m_shutdown_read = true;
-    m_shutdown_write = true;
-
-    // Signal any blocked receivers
-    m_receive_event.Signal();
-
-    // Clear ring queue (no deallocation — just reset indices)
     {
         std::scoped_lock lock(m_queue_mutex);
+        m_state = ProxySocketState::Closed;
+        m_shutdown_read = true;
+        m_shutdown_write = true;
+
+        // Clear ring queue (no deallocation — just reset indices)
         m_rx_head = 0;
         m_rx_tail = 0;
         m_rx_count = 0;
+
+        // Wake every waiter; each one sees Closed and returns.
+        m_receive_event.Signal();
+        m_accept_event.Signal();
+        m_connect_event.Signal();
     }
 
     // For TCP, send ProxyDisconnect to notify the peer
@@ -672,19 +654,6 @@ size_t ProxySocket::GetPendingDataSize() const {
         idx = (idx + 1) % PROXY_SOCKET_MAX_QUEUE_SIZE;
     }
     return total;
-}
-
-bool ProxySocket::WaitForData(u64 timeout_ms) {
-    if (HasPendingData()) {
-        return true;
-    }
-
-    if (timeout_ms == 0) {
-        m_receive_event.Wait();
-        return true;
-    } else {
-        return m_receive_event.TimedWait(TimeSpan::FromMilliSeconds(timeout_ms));
-    }
 }
 
 } // namespace ams::mitm::bsd

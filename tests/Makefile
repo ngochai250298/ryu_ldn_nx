@@ -216,8 +216,23 @@ $(TARGET_BSD_MITM_FILTER): bsd_mitm_filter_tests.o
 	$(CXX) $(LDFLAGS) -o $@ $^
 
 # BSD proxy tests (real bsd/ sources, built against tests/host_shim)
-$(TARGET_BSD_PROXY): bsd_proxy_tests.o
-	$(CXX) $(LDFLAGS) -o $@ $^
+BSD_PROXY_CXXFLAGS := $(CXXFLAGS) -Ihost_shim -pthread
+BSD_PROXY_OBJECTS := bsd_proxy_socket.o bsd_proxy_socket_manager.o bsd_ephemeral_port_pool.o
+
+$(TARGET_BSD_PROXY): bsd_proxy_tests.o $(BSD_PROXY_OBJECTS) log.o config.o
+	$(CXX) $(LDFLAGS) -pthread -o $@ $^
+
+bsd_proxy_tests.o: bsd_proxy_tests.cpp host_shim/stratosphere.hpp
+	$(CXX) $(BSD_PROXY_CXXFLAGS) -c -o $@ $<
+
+bsd_proxy_socket.o: ../sysmodule/source/bsd/proxy_socket.cpp
+	$(CXX) $(BSD_PROXY_CXXFLAGS) -c -o $@ $<
+
+bsd_proxy_socket_manager.o: ../sysmodule/source/bsd/proxy_socket_manager.cpp
+	$(CXX) $(BSD_PROXY_CXXFLAGS) -c -o $@ $<
+
+bsd_ephemeral_port_pool.o: ../sysmodule/source/bsd/ephemeral_port_pool.cpp
+	$(CXX) $(BSD_PROXY_CXXFLAGS) -c -o $@ $<
 
 # Compile test sources
 %.o: %.cpp
