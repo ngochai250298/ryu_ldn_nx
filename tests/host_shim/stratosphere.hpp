@@ -1,10 +1,10 @@
 /**
  * @file stratosphere.hpp
  * @brief Host stand-in for <stratosphere.hpp>, for the bsd proxy and P2P
- *        client send test suites
+ *        lock test suites
  *
  * Provides only what bsd/proxy_socket.cpp, bsd/proxy_socket_manager.cpp,
- * bsd/ephemeral_port_pool.cpp and p2p/p2p_proxy_client.cpp use, mapped onto
+ * bsd/ephemeral_port_pool.cpp and the p2p/ proxy sources use, mapped onto
  * the C++ standard library, so the host tests compile and exercise the real
  * sources. It is on the include path of those two suites only.
  *
@@ -126,7 +126,10 @@ inline Result CreateThread(ThreadType* t, ThreadFunction func, void* arg,
 }
 inline void StartThread(ThreadType* t) { t->thread = std::thread(t->func, t->arg); }
 inline void WaitThread(ThreadType* t) { if (t->thread.joinable()) t->thread.join(); }
-inline void DestroyThread(ThreadType* /*t*/) {}
+// Like ams, DestroyThread waits for a started thread to exit
+inline void DestroyThread(ThreadType* t) { WaitThread(t); }
+inline void SetThreadNamePointer(ThreadType* /*t*/, const char* /*name*/) {}
+constexpr s32 LowestThreadPriority = 31;
 
 class SdkMutex {
 public:
@@ -179,7 +182,18 @@ private:
 };
 
 } // namespace os
+
+namespace svc {
+inline void SleepThread(s64 ns) { std::this_thread::sleep_for(std::chrono::nanoseconds(ns)); }
+} // namespace svc
 } // namespace ams
+
+// libnx tick API, as nanoseconds
+inline u64 armGetSystemTick() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+inline u64 armTicksToNs(u64 ticks) { return ticks; }
 
 #define R_SUCCEEDED(r) ((r).GetValue() == 0)
 #define R_FAILED(r) (!R_SUCCEEDED(r))

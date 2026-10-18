@@ -710,28 +710,31 @@ all: $(TARGET_DNS_WRAP)
 test: test-dns-wrap
 clean: clean-dns-wrap
 
-# Real p2p/p2p_proxy_client.cpp against tests/host_shim (C++20 for constinit)
-TARGET_P2P_CLIENT_SEND := run_p2p_client_send_tests
-P2P_CLIENT_SEND_CXXFLAGS := $(CXXFLAGS) -std=c++20 -Ihost_shim -pthread
+# Real p2p/ proxy sources against tests/host_shim (C++20 for constinit)
+TARGET_P2P_LOCK := run_p2p_lock_tests
+P2P_LOCK_CXXFLAGS := $(CXXFLAGS) -std=c++20 -Ihost_shim -pthread
 
-$(TARGET_P2P_CLIENT_SEND): p2p_client_send_tests.o p2p_client_real.o log.o config.o
+$(TARGET_P2P_LOCK): p2p_lock_tests.o p2p_client_real.o p2p_server_real.o log.o config.o
 	$(CXX) $(LDFLAGS) -pthread -o $@ $^
 
-p2p_client_send_tests.o: p2p_client_send_tests.cpp host_shim/stratosphere.hpp
-	$(CXX) $(P2P_CLIENT_SEND_CXXFLAGS) -c -o $@ $<
+p2p_lock_tests.o: p2p_lock_tests.cpp host_shim/stratosphere.hpp
+	$(CXX) $(P2P_LOCK_CXXFLAGS) -c -o $@ $<
 
 p2p_client_real.o: ../sysmodule/source/p2p/p2p_proxy_client.cpp host_shim/stratosphere.hpp
-	$(CXX) $(P2P_CLIENT_SEND_CXXFLAGS) -c -o $@ $<
+	$(CXX) $(P2P_LOCK_CXXFLAGS) -c -o $@ $<
 
-.PHONY: test-p2p-client-send clean-p2p-client-send
-test-p2p-client-send: $(TARGET_P2P_CLIENT_SEND)
+p2p_server_real.o: ../sysmodule/source/p2p/p2p_proxy_server.cpp host_shim/stratosphere.hpp
+	$(CXX) $(P2P_LOCK_CXXFLAGS) -c -o $@ $<
+
+.PHONY: test-p2p-lock clean-p2p-lock
+test-p2p-lock: $(TARGET_P2P_LOCK)
 	@echo ""
-	@echo "=== Running P2P Client Send Tests ==="
-	./$(TARGET_P2P_CLIENT_SEND)
+	@echo "=== Running P2P Lock Tests ==="
+	./$(TARGET_P2P_LOCK)
 
-clean-p2p-client-send:
-	rm -f $(TARGET_P2P_CLIENT_SEND)
+clean-p2p-lock:
+	rm -f $(TARGET_P2P_LOCK)
 
-all: $(TARGET_P2P_CLIENT_SEND)
-test: test-p2p-client-send
-clean: clean-p2p-client-send
+all: $(TARGET_P2P_LOCK)
+test: test-p2p-lock
+clean: clean-p2p-lock

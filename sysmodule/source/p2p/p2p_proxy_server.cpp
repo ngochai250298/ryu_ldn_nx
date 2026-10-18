@@ -1713,7 +1713,9 @@ void P2pProxyServer::ReapZombieSessions(bool wait_all) {
         std::scoped_lock lock(m_mutex);
         int kept = 0;
         for (int i = 0; i < m_zombie_session_count; ++i) {
-            P2pProxySession* z = m_zombie_sessions[i].get();
+            // release(), not get(): the slot must stop owning z, or the
+            // resets below delete it here, before its thread is joined.
+            P2pProxySession* z = m_zombie_sessions[i].release();
             if (z != nullptr && (wait_all || z->m_thread_done.load(std::memory_order_acquire))) {
                 zombies[taken++] = z;
             } else {
