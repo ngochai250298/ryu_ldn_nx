@@ -42,7 +42,14 @@ std::shared_ptr<ProxySocket> ProxySocketManager::CreateProxySocket(s32 fd, ryu_l
         return nullptr;
     }
 
-    auto socket = std::make_shared<ProxySocket>(type, protocol);
+    // nothrow: a failed allocation becomes ENOMEM for the game, not a
+    // constructor running at address 0.
+    ProxySocket* raw = new (std::nothrow) ProxySocket(type, protocol);
+    if (raw == nullptr) {
+        LOG_WARN("ProxySocketManager: out of memory creating proxy for fd=%d", fd);
+        return nullptr;
+    }
+    std::shared_ptr<ProxySocket> socket(raw);
     m_sockets[fd] = socket;
     return socket;
 }
@@ -113,9 +120,7 @@ void ProxySocketManager::Reset() {
     std::scoped_lock lock(m_mutex);
 
     // Clear pending packets ring (no dealloc — just reset indices)
-    m_pending_head = 0;
-    m_pending_tail = 0;
-    m_pending_count = 0;
+    m_pending.Clear();
 
     // Reset local IP
     m_local_ip = 0;
@@ -326,25 +331,11 @@ bool ProxySocketManager::RouteIncomingData(uint32_t source_ip, uint16_t source_p
                                                       targets, kMaxSockets);
 
     if (match_count == 0) {
-        // No matching socket — buffer into fixed-size ring for post-bind delivery.
-        if (m_pending_count >= MaxPendingPackets) {
-            // Drop oldest
-            m_pending_head = (m_pending_head + 1) % MaxPendingPackets;
-            m_pending_count--;
+        // No matching socket — buffer for post-bind delivery. Oversize
+        // datagrams are dropped, never stored cut short.
+        if (data_len <= PROXY_SOCKET_MAX_PAYLOAD && (data != nullptr || data_len == 0)) {
+            m_pending.Push(PendingHeader{source_ip, dest_ip, source_port, dest_port, protocol}, data, data_len);
         }
-        PendingPacket& slot = m_pending_ring[m_pending_tail];
-        slot.source_ip = source_ip;
-        slot.source_port = source_port;
-        slot.dest_ip = dest_ip;
-        slot.dest_port = dest_port;
-        slot.protocol = protocol;
-        size_t copy_len = std::min(data_len, static_cast<size_t>(PendingPayloadMax));
-        slot.len = static_cast<uint16_t>(copy_len);
-        if (copy_len > 0 && data != nullptr) {
-            std::memcpy(slot.data, data, copy_len);
-        }
-        m_pending_tail = (m_pending_tail + 1) % MaxPendingPackets;
-        m_pending_count++;
         return false;
     }
 
@@ -459,18 +450,17 @@ void ProxySocketManager::DeliverPendingPackets(ProxySocket* socket, uint16_t por
     // Caller must NOT hold m_mutex (we take it here)
     std::scoped_lock lock(m_mutex);
 
-    if (socket == nullptr || m_pending_count == 0) {
+    if (socket == nullptr) {
         return;
     }
 
-    // Walk the ring in arrival order, delivering matches and compacting in place.
-    size_t read_idx = m_pending_head;
-    size_t write_idx = m_pending_head;
-    size_t remaining = m_pending_count;
-    size_t kept = 0;
-
-    while (remaining > 0) {
-        const PendingPacket& pkt = m_pending_ring[read_idx];
+    // Take each datagram off the front once; deliver matches, re-queue the
+    // rest at the back so their order is kept.
+    uint8_t payload[PROXY_SOCKET_MAX_PAYLOAD];
+    for (size_t n = m_pending.Count(); n > 0; n--) {
+        PendingHeader pkt;
+        const size_t len = m_pending.Front(&pkt, payload, sizeof(payload));
+        m_pending.Pop();
 
         if (pkt.protocol == protocol && pkt.dest_port == port) {
             ryu_ldn::bsd::SockAddrIn from_addr{};
@@ -478,23 +468,11 @@ void ProxySocketManager::DeliverPendingPackets(ProxySocket* socket, uint16_t por
             from_addr.sin_family = static_cast<uint8_t>(ryu_ldn::bsd::AddressFamily::Inet);
             from_addr.sin_port = __builtin_bswap16(pkt.source_port);
             from_addr.sin_addr = __builtin_bswap32(pkt.source_ip);  // Ryujinx -> network byte order
-
-            socket->IncomingData(pkt.data, pkt.len, from_addr);
-            // Drop this slot by not copying it forward
+            socket->IncomingData(payload, len, from_addr);
         } else {
-            if (write_idx != read_idx) {
-                m_pending_ring[write_idx] = pkt;
-            }
-            write_idx = (write_idx + 1) % MaxPendingPackets;
-            kept++;
+            m_pending.Push(pkt, payload, len);
         }
-
-        read_idx = (read_idx + 1) % MaxPendingPackets;
-        remaining--;
     }
-
-    m_pending_tail = write_idx;
-    m_pending_count = kept;
 }
 
 } // namespace ams::mitm::bsd

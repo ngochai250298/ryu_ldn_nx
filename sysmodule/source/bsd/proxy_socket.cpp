@@ -273,23 +273,16 @@ s32 ProxySocket::RecvFrom(void* buffer, size_t len, s32 flags, ryu_ldn::bsd::Soc
                 return 0; // EOF
             }
 
-            if (m_rx_count > 0) {
-                const ReceivedPacket& slot = m_rx_ring[m_rx_head];
-                const size_t copy_len = std::min(len, static_cast<size_t>(slot.len));
-                if (copy_len > 0) {
-                    std::memcpy(buffer, slot.data, copy_len);
-                }
-                if (from != nullptr) {
-                    *from = slot.from;
-                }
+            if (!m_rx_ring.Empty()) {
+                // A datagram larger than the buffer is truncated, the rest discarded.
+                const size_t full_len = m_rx_ring.Front(from, buffer, len);
                 if (!peek) {
-                    m_rx_head = (m_rx_head + 1) % PROXY_SOCKET_MAX_QUEUE_SIZE;
-                    m_rx_count--;
+                    m_rx_ring.Pop();
                 }
-                if (m_rx_count == 0) {
+                if (m_rx_ring.Empty()) {
                     m_receive_event.Clear();
                 }
-                return static_cast<s32>(copy_len);
+                return static_cast<s32>(std::min(len, full_len));
             }
 
             if (dontwait) {
@@ -335,29 +328,17 @@ void ProxySocket::IncomingData(const void* data, size_t len, const ryu_ldn::bsd:
     // anchor for a future destination-aware implementation if the proxy
     // protocol ever carries the destination address.
 
-    // Clamp payload to fixed buffer size. UDP datagrams larger than our MTU
-    // would already have been rejected by SendTo's MsgSize check on the
-    // sender side; clamping here is a defensive guard.
-    size_t copy_len = std::min(len, static_cast<size_t>(PROXY_SOCKET_MAX_PAYLOAD));
+    // A datagram larger than any game frame is dropped rather than cut short
+    // and delivered as if complete.
+    if (len > PROXY_SOCKET_MAX_PAYLOAD || (data == nullptr && len > 0)) {
+        LOG_WARN("ProxySocket IncomingData: dropping %zu-byte datagram (max %zu)", len, PROXY_SOCKET_MAX_PAYLOAD);
+        return;
+    }
 
     std::scoped_lock lock(m_queue_mutex);
 
-    // Drop oldest if ring is full (UDP behavior)
-    if (m_rx_count >= PROXY_SOCKET_MAX_QUEUE_SIZE) {
-        m_rx_head = (m_rx_head + 1) % PROXY_SOCKET_MAX_QUEUE_SIZE;
-        m_rx_count--;
-    }
-
-    // Write into tail slot in-place — no heap allocation per packet.
-    ReceivedPacket& slot = m_rx_ring[m_rx_tail];
-    slot.from = from;
-    slot.len = static_cast<uint16_t>(copy_len);
-    if (copy_len > 0 && data != nullptr) {
-        std::memcpy(slot.data, data, copy_len);
-    }
-
-    m_rx_tail = (m_rx_tail + 1) % PROXY_SOCKET_MAX_QUEUE_SIZE;
-    m_rx_count++;
+    // Drops the oldest datagrams if full (UDP behavior); no allocation.
+    m_rx_ring.Push(from, data, len);
 
     m_receive_event.Signal();
 }
@@ -526,7 +507,11 @@ void ProxySocket::IncomingConnection(const ryu_ldn::protocol::ProxyConnectReques
     }
 
     // Create a new socket for the accepted connection
-    auto accepted = std::make_unique<ProxySocket>(m_type, m_protocol);
+    std::unique_ptr<ProxySocket> accepted(new (std::nothrow) ProxySocket(m_type, m_protocol));
+    if (accepted == nullptr) {
+        LOG_WARN("ProxySocket IncomingConnection: out of memory, connection dropped");
+        return;
+    }
 
     // Set local address (same as listening socket)
     accepted->m_local_addr = m_local_addr;
@@ -609,9 +594,7 @@ Result ProxySocket::Close() {
         m_shutdown_write = true;
 
         // Clear ring queue (no deallocation — just reset indices)
-        m_rx_head = 0;
-        m_rx_tail = 0;
-        m_rx_count = 0;
+        m_rx_ring.Clear();
 
         // Wake every waiter; each one sees Closed and returns.
         m_receive_event.Signal();
@@ -640,17 +623,12 @@ Result ProxySocket::Close() {
 
 bool ProxySocket::HasPendingData() const {
     std::scoped_lock lock(m_queue_mutex);
-    return m_rx_count > 0;
+    return !m_rx_ring.Empty();
 }
 
 size_t ProxySocket::GetPendingDataSize() const {
     std::scoped_lock lock(m_queue_mutex);
-    size_t total = 0;
-    for (size_t i = 0, idx = m_rx_head; i < m_rx_count; i++) {
-        total += m_rx_ring[idx].len;
-        idx = (idx + 1) % PROXY_SOCKET_MAX_QUEUE_SIZE;
-    }
-    return total;
+    return m_rx_ring.PayloadBytes();
 }
 
 } // namespace ams::mitm::bsd

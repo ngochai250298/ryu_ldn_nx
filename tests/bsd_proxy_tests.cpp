@@ -15,12 +15,14 @@
 #include <cstddef>
 #include <chrono>
 #include <thread>
+#include <cstring>
 #include <atomic>
 #include <unistd.h>
 
 #include "bsd/bsd_types.hpp"
 #include "bsd/proxy_socket.hpp"
 #include "bsd/proxy_socket_manager.hpp"
+#include "bsd/packet_ring.hpp"
 
 // ============================================================================
 // Test Framework (minimal)
@@ -318,6 +320,125 @@ TEST(reset_sends_tcp_disconnect_before_clearing_callbacks) {
     g_disconnects = 0;
     FinishesInTime([&] { m.Reset(); });
     ASSERT_EQ(g_disconnects.load(), 1);
+}
+
+// ============================================================================
+// Receive buffers (heap size, oversize datagrams)
+// ============================================================================
+
+using SmallRing = ams::mitm::bsd::PacketRing<uint32_t, 64>;
+
+TEST(packet_ring_keeps_variable_sized_datagrams_in_order) {
+    SmallRing ring;
+    ASSERT_TRUE(ring.Push(1, "ab", 2));
+    ASSERT_TRUE(ring.Push(2, "cdef", 4));
+    ASSERT_EQ(ring.Count(), 2u);
+    ASSERT_EQ(ring.PayloadBytes(), 6u);
+    uint32_t h = 0;
+    char buf[8] = {};
+    ASSERT_EQ(ring.Front(&h, buf, sizeof(buf)), 2u);
+    ASSERT_EQ(h, 1u);
+    ASSERT_TRUE(std::memcmp(buf, "ab", 2) == 0);
+    ring.Pop();
+    ASSERT_EQ(ring.Front(&h, buf, sizeof(buf)), 4u);
+    ASSERT_EQ(h, 2u);
+    ASSERT_TRUE(std::memcmp(buf, "cdef", 4) == 0);
+}
+
+TEST(packet_ring_wraps_and_drops_oldest_when_full) {
+    SmallRing ring;  // 15-byte records (4 + 2 + 9) don't divide 64, so they straddle the end
+    char payload[20];
+    for (int i = 0; i < 20; i++) payload[i] = static_cast<char>('a' + i);
+    for (uint32_t i = 0; i < 10; i++) {
+        ASSERT_TRUE(ring.Push(i, payload + i, 9));
+    }
+    // 64 bytes hold four records: the newest four survive, in order.
+    ASSERT_EQ(ring.Count(), 4u);
+    char buf[16];
+    for (uint32_t i = 6; i < 10; i++) {
+        uint32_t h = 0;
+        ASSERT_EQ(ring.Front(&h, buf, sizeof(buf)), 9u);
+        ASSERT_EQ(h, i);
+        ASSERT_TRUE(std::memcmp(buf, payload + i, 9) == 0);
+        ring.Pop();
+    }
+    ASSERT_TRUE(ring.Empty());
+    ASSERT_EQ(ring.PayloadBytes(), 0u);
+}
+
+TEST(packet_ring_rejects_record_larger_than_buffer) {
+    SmallRing ring;
+    char big[64] = {};
+    ASSERT_TRUE(ring.Push(1, "x", 1));
+    ASSERT_FALSE(ring.Push(2, big, sizeof(big)));
+    ASSERT_EQ(ring.Count(), 1u);  // nothing evicted for a record that can't fit
+}
+
+TEST(proxy_socket_is_about_16_kb) {
+    // It was ~65 KB with 32 fixed 2 KB slots; the heap is 384 KB.
+    ASSERT_TRUE(sizeof(ProxySocket) < 20 * 1024);
+}
+
+TEST(oversize_datagram_is_dropped_not_truncated) {
+    auto s = BoundUdp();
+    static char big[ams::mitm::bsd::PROXY_SOCKET_MAX_PAYLOAD + 1];
+    s->IncomingData(big, sizeof(big), LdnAddr(1));
+    ASSERT_FALSE(s->HasPendingData());
+}
+
+TEST(short_recv_buffer_truncates_and_discards_rest) {
+    auto s = BoundUdp();
+    s->IncomingData("abcdef", 6, LdnAddr(1));
+    s->IncomingData("xy", 2, LdnAddr(1));
+    char buf[4];
+    ASSERT_EQ(s->RecvFrom(buf, 3, rb::MSG_FLAG_DONTWAIT, nullptr), 3);
+    ASSERT_EQ(s->RecvFrom(buf, sizeof(buf), rb::MSG_FLAG_DONTWAIT, nullptr), 2);
+    ASSERT_TRUE(std::memcmp(buf, "xy", 2) == 0);
+}
+
+TEST(fionread_counts_queued_payload_bytes) {
+    auto s = BoundUdp();
+    s->IncomingData("abc", 3, LdnAddr(1));
+    s->IncomingData("de", 2, LdnAddr(1));
+    ASSERT_EQ(s->GetPendingDataSize(), 5u);
+}
+
+TEST(pending_datagrams_reach_the_socket_that_binds_later) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    static char big[ams::mitm::bsd::PROXY_SOCKET_MAX_PAYLOAD + 1];
+    // Arrive before anything is bound on 7000 (and one for another port).
+    m.RouteIncomingData(0x0A720002, 1, 0x0A720001, 7000, rb::ProtocolType::Udp, "one", 3);
+    m.RouteIncomingData(0x0A720002, 1, 0x0A720001, 7001, rb::ProtocolType::Udp, "other", 5);
+    m.RouteIncomingData(0x0A720002, 1, 0x0A720001, 7000, rb::ProtocolType::Udp, big, sizeof(big));
+    m.RouteIncomingData(0x0A720002, 1, 0x0A720001, 7000, rb::ProtocolType::Udp, "two", 3);
+
+    auto s = m.CreateProxySocket(11, rb::SocketType::Dgram, rb::ProtocolType::Udp);
+    s->Bind(LdnAddr(7000));
+    m.DeliverPendingPackets(s.get(), 7000, rb::ProtocolType::Udp);
+
+    char buf[8];
+    ASSERT_EQ(s->RecvFrom(buf, sizeof(buf), rb::MSG_FLAG_DONTWAIT, nullptr), 3);
+    ASSERT_TRUE(std::memcmp(buf, "one", 3) == 0);
+    ASSERT_EQ(s->RecvFrom(buf, sizeof(buf), rb::MSG_FLAG_DONTWAIT, nullptr), 3);
+    ASSERT_TRUE(std::memcmp(buf, "two", 3) == 0);
+    ASSERT_EQ(s->RecvFrom(buf, sizeof(buf), rb::MSG_FLAG_DONTWAIT, nullptr), -kEAgain);
+
+    // The datagram for the other port is still pending.
+    auto other = m.CreateProxySocket(12, rb::SocketType::Dgram, rb::ProtocolType::Udp);
+    other->Bind(LdnAddr(7001));
+    m.DeliverPendingPackets(other.get(), 7001, rb::ProtocolType::Udp);
+    ASSERT_EQ(other->RecvFrom(buf, sizeof(buf), rb::MSG_FLAG_DONTWAIT, nullptr), 5);
+}
+
+TEST(proxy_count_is_capped) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    for (s32 fd = 0; fd < static_cast<s32>(ams::mitm::bsd::MAX_PROXY_SOCKETS); fd++) {
+        ASSERT_TRUE(m.CreateProxySocket(100 + fd, rb::SocketType::Dgram, rb::ProtocolType::Udp) != nullptr);
+    }
+    ASSERT_TRUE(m.CreateProxySocket(999, rb::SocketType::Dgram, rb::ProtocolType::Udp) == nullptr);
+    m.Reset();
 }
 
 TEST(timeval_to_nanoseconds) {

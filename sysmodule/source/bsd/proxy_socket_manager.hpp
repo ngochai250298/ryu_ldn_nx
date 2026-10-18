@@ -74,9 +74,11 @@ namespace ams::mitm::bsd {
 /**
  * @brief Maximum number of concurrent proxy sockets
  *
- * Limits memory usage. Games typically don't need many sockets for LDN.
+ * Each proxy socket takes ~16.5 KB of the 384 KB sysmodule heap, so this
+ * caps proxies at about a third of it. PIA opens a handful of sockets; the
+ * next one past the cap fails with ENOMEM.
  */
-constexpr size_t MAX_PROXY_SOCKETS = 64;
+constexpr size_t MAX_PROXY_SOCKETS = 8;
 
 /**
  * @brief Invalid file descriptor sentinel
@@ -608,25 +610,18 @@ private:
     // Packet Buffering (for packets arriving before socket bind)
     // =========================================================================
 
-    static constexpr size_t MaxPendingPackets = 16;
-    static constexpr size_t PendingPayloadMax = 1400;
-
-    struct PendingPacket {
+    struct PendingHeader {
         uint32_t source_ip;
-        uint16_t source_port;
         uint32_t dest_ip;
+        uint16_t source_port;
         uint16_t dest_port;
-        uint16_t len;
         ryu_ldn::bsd::ProtocolType protocol;
-        uint8_t data[PendingPayloadMax];
     };
 
-    // Fixed-size ring buffer — same rationale as ProxySocket's rx ring:
-    // no heap allocation per arriving packet.
-    PendingPacket m_pending_ring[MaxPendingPackets];
-    size_t m_pending_head = 0;
-    size_t m_pending_tail = 0;
-    size_t m_pending_count = 0;
+    // Datagrams for a port nobody has bound yet, oldest dropped when full.
+    // No heap allocation per arriving packet.
+    static constexpr size_t PendingBufferSize = 8 * 1024;
+    PacketRing<PendingHeader, PendingBufferSize> m_pending;
 };
 
 } // namespace ams::mitm::bsd

@@ -48,6 +48,7 @@
 #include <deque>
 #include <vector>
 #include "bsd_types.hpp"
+#include "packet_ring.hpp"
 #include "../protocol/types.hpp"
 
 namespace ams::mitm::bsd {
@@ -56,12 +57,14 @@ namespace ams::mitm::bsd {
 class ProxySocketManager;
 
 /**
- * @brief Maximum size of the receive queue per socket
+ * @brief Receive buffer per proxy socket, in bytes
  *
- * Limits memory usage per socket. If the queue is full, oldest
- * packets are dropped (UDP behavior).
+ * Datagrams are stored back to back (see PacketRing), so this holds about
+ * eleven 1460-byte MK8DX frames or well over a hundred small PIA packets.
+ * When it is full the oldest datagrams are dropped (UDP behaviour). Each
+ * ProxySocket is heap-allocated, so this sets most of its ~16.5 KB.
  */
-constexpr size_t PROXY_SOCKET_MAX_QUEUE_SIZE = 32;
+constexpr size_t PROXY_SOCKET_RX_BUFFER_SIZE = 16 * 1024;
 
 /**
  * @brief Maximum payload size for a single ProxyData packet
@@ -96,22 +99,6 @@ enum class ProxySocketState {
     Connected,      ///< Socket connected to remote (TCP) or has default dest (UDP)
     Listening,      ///< Socket listening for connections (TCP only)
     Closed,         ///< Socket closed, awaiting cleanup
-};
-
-/**
- * @brief Received packet data with source information
- *
- * Stores a received ProxyData packet along with the source address
- * for RecvFrom() calls. Fixed-size payload buffer so the enclosing
- * ring queue can live inline in ProxySocket with zero heap allocations
- * per packet — LDN traffic on real Switch cannot afford an alloc+free
- * cycle per datagram (100+ pkts/s) on top of the internet round-trip.
- */
-struct ReceivedPacket {
-    ryu_ldn::bsd::SockAddrIn from;                   ///< Source address
-    uint16_t len;                                    ///< Payload length (<= PROXY_SOCKET_MAX_PAYLOAD)
-    uint16_t _pad;                                   ///< Alignment
-    uint8_t data[PROXY_SOCKET_MAX_PAYLOAD];          ///< Payload buffer
 };
 
 /**
@@ -536,14 +523,11 @@ private:
     mutable os::Mutex m_queue_mutex{false};
 
     /**
-     * @brief Receive queue (incoming packets) — fixed-size ring buffer.
+     * @brief Receive queue (incoming datagrams with their source address).
      * Producer: network thread via IncomingData. Consumer: game thread via
      * RecvFrom. Full = drop oldest (UDP behavior). Protected by m_queue_mutex.
      */
-    ReceivedPacket m_rx_ring[PROXY_SOCKET_MAX_QUEUE_SIZE];
-    size_t m_rx_head = 0;                            ///< Read index
-    size_t m_rx_tail = 0;                            ///< Write index
-    size_t m_rx_count = 0;                           ///< Elements in ring
+    PacketRing<ryu_ldn::bsd::SockAddrIn, PROXY_SOCKET_RX_BUFFER_SIZE> m_rx_ring;
 
     /**
      * @brief Event signaled when data is available

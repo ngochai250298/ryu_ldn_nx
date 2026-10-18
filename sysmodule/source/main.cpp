@@ -146,10 +146,9 @@ namespace ams {
         os::ThreadType g_bsd_threads[BsdThreadCount];
 
         // Heap for dynamic allocations
-        // NOTE: 384KB covers: game whitelist (~40KB), proxy socket receive queues
-        // (up to ~45KB under lobby traffic with 900+ byte packets), pending-packet
-        // buffer, ExpHeap overhead/fragmentation, and transient std::vector/std::deque
-        // allocations. 96KB saturated under real gameplay traffic and caused DABRT
+        // NOTE: 384KB covers: game whitelist (~40KB), proxy sockets (~16.5KB each,
+        // at most MAX_PROXY_SOCKETS = 8), ExpHeap overhead/fragmentation, and
+        // transient std::vector/std::deque allocations. 96KB saturated under real gameplay traffic and caused DABRT
         // 0x101 on allocation failure.
         alignas(0x40) constinit u8 g_heap_memory[384_KB];
         constinit lmem::HeapHandle g_heap_handle;
@@ -501,7 +500,12 @@ namespace ams {
 // ============================================================================
 
 void* operator new(size_t size) {
-    return ams::mitm::Allocate(size);
+    // Plain new can't report failure (no exceptions), and returning null lets
+    // the caller construct at address 0. Callers that can fail cleanly use
+    // new (std::nothrow).
+    void* p = ams::mitm::Allocate(size);
+    AMS_ABORT_UNLESS(p != nullptr);
+    return p;
 }
 
 void* operator new(size_t size, const std::nothrow_t&) {
@@ -517,7 +521,9 @@ void operator delete(void* p, size_t size) {
 }
 
 void* operator new[](size_t size) {
-    return ams::mitm::Allocate(size);
+    void* p = ams::mitm::Allocate(size);
+    AMS_ABORT_UNLESS(p != nullptr);
+    return p;
 }
 
 void* operator new[](size_t size, const std::nothrow_t&) {
