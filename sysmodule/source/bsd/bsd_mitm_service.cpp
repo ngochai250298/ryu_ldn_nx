@@ -590,6 +590,53 @@ std::shared_ptr<ProxySocket> CreateProxy(ProxySocketManager& manager, u64 key, c
     return proxy;
 }
 
+/// Creates key's proxy bound to addr (port 0 picks an ephemeral port) and
+/// marks the fd as a proxy. On failure nothing is left behind: the proxy is
+/// closed and its port released. Returns 0 or -errno.
+s32 CreateBoundProxy(ProxySocketManager& manager, u64 key, const SocketInfo& info,
+                     rb::SockAddrIn addr, std::shared_ptr<ProxySocket>* out) {
+    if (manager.GetProxySocket(key) != nullptr) {
+        return -static_cast<s32>(rb::BsdErrno::Inval);  // already bound
+    }
+    auto proxy = CreateProxy(manager, key, info);
+    if (proxy == nullptr) {
+        return -static_cast<s32>(rb::BsdErrno::NoMem);
+    }
+
+    uint16_t port = addr.GetPort();
+    if (port == 0) {
+        port = manager.AllocatePort(info.protocol);
+        if (port == 0) {
+            manager.CloseProxySocket(key);
+            return -static_cast<s32>(rb::BsdErrno::AddrInUse);
+        }
+        addr.sin_port = __builtin_bswap16(port);
+    } else if (!manager.ReservePort(port, info.protocol)) {
+        manager.CloseProxySocket(key);
+        return -static_cast<s32>(rb::BsdErrno::AddrInUse);
+    }
+
+    const s32 result = ErrnoResult(proxy->Bind(addr));
+    if (result < 0) {
+        manager.ReleasePort(port, info.protocol);  // unbound, so Close won't
+        manager.CloseProxySocket(key);
+        return result;
+    }
+
+    MarkProxy(key);
+    *out = std::move(proxy);
+    return 0;
+}
+
+/// The address an implicit bind (connect/sendto on an unbound fd) uses.
+rb::SockAddrIn SessionAddr(ProxySocketManager& manager) {
+    rb::SockAddrIn addr{};
+    addr.sin_len = sizeof(addr);
+    addr.sin_family = static_cast<u8>(rb::AddressFamily::Inet);
+    addr.sin_addr = __builtin_bswap32(manager.GetLocalIp());  // network order
+    return addr;
+}
+
 rb::ProtocolType DefaultProtocol(s32 type, s32 protocol) {
     if (protocol != 0) {
         return static_cast<rb::ProtocolType>(protocol);
@@ -651,16 +698,11 @@ Result BsdMitmService::Close(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 f
     AMS_UNUSED(out_ret, out_errno);
     m_command_count++;
 
-    bool was_proxy = false;
     {
         std::scoped_lock lock(g_socket_info_mutex);
-        auto it = g_socket_info.find(Key(fd));
-        if (it != g_socket_info.end()) {
-            was_proxy = it->second.is_proxy;
-            g_socket_info.erase(it);
-        }
+        g_socket_info.erase(Key(fd));
     }
-    if (was_proxy && ProxySocketManager::GetInstance().CloseProxySocket(Key(fd))) {
+    if (ProxySocketManager::GetInstance().CloseProxySocket(Key(fd))) {
         LOG_INFO("[BSD#%u] Close fd=%d closed LDN proxy socket", m_session_id, fd);
     }
 
@@ -692,36 +734,21 @@ Result BsdMitmService::Bind(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
         R_RETURN(ForwardToRealService());
     }
 
-    auto proxy = CreateProxy(manager, Key(fd), socket_info);
-    if (proxy == nullptr) {
-        LOG_ERROR("[BSD#%u] Bind fd=%d failed to create proxy socket", m_session_id, fd);
-        R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NoMem)));
-    }
-
     rb::SockAddrIn bind_addr = sock_addr;
     if (is_inaddr_any) {
         // sin_addr is network order; the manager keeps the Ryujinx format.
         bind_addr.sin_addr = __builtin_bswap32(manager.GetLocalIp());
     }
 
-    if (bind_addr.GetPort() == 0) {
-        const uint16_t ephemeral = manager.AllocatePort(socket_info.protocol);
-        if (ephemeral == 0) {
-            R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::AddrInUse)));
-        }
-        bind_addr.sin_port = __builtin_bswap16(ephemeral);
-    } else if (!manager.ReservePort(bind_addr.GetPort(), socket_info.protocol)) {
-        R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::AddrInUse)));
-    }
-
-    const s32 bind_result = ErrnoResult(proxy->Bind(bind_addr));
+    std::shared_ptr<ProxySocket> proxy;
+    const s32 bind_result = CreateBoundProxy(manager, Key(fd), socket_info, bind_addr, &proxy);
     if (bind_result < 0) {
+        LOG_ERROR("[BSD#%u] Bind fd=%d proxy bind failed: errno=%d", m_session_id, fd, -bind_result);
         R_RETURN(Reply(out_ret, out_errno, bind_result));
     }
 
-    MarkProxy(Key(fd));
-    LOG_INFO("[BSD#%u] Bind fd=%d bound to LDN proxy port %u", m_session_id, fd, bind_addr.GetPort());
-    manager.DeliverPendingPackets(proxy.get(), bind_addr.GetPort(), socket_info.protocol);
+    LOG_INFO("[BSD#%u] Bind fd=%d bound to LDN proxy port %u", m_session_id, fd, proxy->GetLocalAddr().GetPort());
+    manager.DeliverPendingPackets(proxy.get(), proxy->GetLocalAddr().GetPort(), socket_info.protocol);
 
     // INADDR_ANY binds also bind the real socket so non-LDN traffic still works.
     if (is_inaddr_any) {
@@ -753,26 +780,10 @@ Result BsdMitmService::Connect(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32
 
     auto& manager = ProxySocketManager::GetInstance();
     auto proxy = manager.GetProxySocket(Key(fd));
-    if (proxy == nullptr) {
-        proxy = CreateProxy(manager, Key(fd), socket_info);
-        if (proxy == nullptr) {
-            R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NoMem)));
-        }
-
-        const uint16_t ephemeral = manager.AllocatePort(socket_info.protocol);
-        if (ephemeral == 0) {
-            R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::AddrInUse)));
-        }
-
-        rb::SockAddrIn local_addr{};
-        local_addr.sin_len = sizeof(local_addr);
-        local_addr.sin_family = static_cast<u8>(rb::AddressFamily::Inet);
-        local_addr.sin_port = __builtin_bswap16(ephemeral);
-        local_addr.sin_addr = __builtin_bswap32(manager.GetLocalIp());  // network order
-
-        const s32 bind_result = ErrnoResult(proxy->Bind(local_addr));
+    const bool created = (proxy == nullptr);
+    if (created) {
+        const s32 bind_result = CreateBoundProxy(manager, Key(fd), socket_info, SessionAddr(manager), &proxy);
         if (bind_result < 0) {
-            manager.ReleasePort(ephemeral, socket_info.protocol);
             R_RETURN(Reply(out_ret, out_errno, bind_result));
         }
     }
@@ -780,6 +791,11 @@ Result BsdMitmService::Connect(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32
     const s32 connect_result = ErrnoResult(proxy->Connect(sock_addr));
     if (connect_result < 0) {
         LOG_ERROR("[BSD#%u] Connect fd=%d proxy connect failed: errno=%d", m_session_id, fd, -connect_result);
+        if (created) {
+            // Leave the fd as it was before connect().
+            UpdateSocketInfo(Key(fd), [](SocketInfo& info) { info.is_proxy = false; });
+            manager.CloseProxySocket(Key(fd));
+        }
         R_RETURN(Reply(out_ret, out_errno, connect_result));
     }
 
@@ -864,28 +880,12 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
 
     // First send to an LDN address from an unbound socket: auto-bind a proxy.
     if (has_dest && dest.IsLdnAddress() && found && !socket_info.is_proxy) {
-        is_proxy = true;
-        if (manager.GetProxySocket(Key(fd)) == nullptr) {
-            auto proxy = CreateProxy(manager, Key(fd), socket_info);
-            if (proxy == nullptr) {
-                R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NoMem)));
-            }
-            const uint16_t ephemeral = manager.AllocatePort(socket_info.protocol);
-            if (ephemeral == 0) {
-                R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::AddrInUse)));
-            }
-            rb::SockAddrIn local_addr{};
-            local_addr.sin_len = sizeof(local_addr);
-            local_addr.sin_family = static_cast<u8>(rb::AddressFamily::Inet);
-            local_addr.sin_port = __builtin_bswap16(ephemeral);
-            local_addr.sin_addr = __builtin_bswap32(manager.GetLocalIp());  // network order
-            const s32 bind_result = ErrnoResult(proxy->Bind(local_addr));
-            if (bind_result < 0) {
-                manager.ReleasePort(ephemeral, socket_info.protocol);
-                R_RETURN(Reply(out_ret, out_errno, bind_result));
-            }
+        std::shared_ptr<ProxySocket> created;
+        const s32 bind_result = CreateBoundProxy(manager, Key(fd), socket_info, SessionAddr(manager), &created);
+        if (bind_result < 0) {
+            R_RETURN(Reply(out_ret, out_errno, bind_result));
         }
-        MarkProxy(Key(fd));
+        is_proxy = true;
     }
 
     // Internet destinations use the real socket even on a proxied fd (an
@@ -895,9 +895,13 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
     }
 
     auto proxy = manager.GetProxySocket(Key(fd));
-    if (proxy == nullptr || !has_dest) {
+    if (proxy == nullptr) {
         // The real socket can't reach LDN addresses.
         R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NetUnreach)));
+    }
+    if (!has_dest) {
+        // sendto() without an address on a connected socket is send().
+        R_RETURN(Reply(out_ret, out_errno, proxy->Send(buffer.GetPointer(), buffer.GetSize(), flags)));
     }
     R_RETURN(Reply(out_ret, out_errno, proxy->SendTo(buffer.GetPointer(), buffer.GetSize(), flags, dest)));
 }

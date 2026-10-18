@@ -444,6 +444,25 @@ TEST(proxy_count_is_capped) {
     m.Reset();
 }
 
+// The bind/connect/sendto error paths undo a half-made proxy with
+// CloseProxySocket; it must free the slot and leave other ports reserved.
+TEST(closing_unbound_proxy_frees_slot_and_keeps_other_ports) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    auto bound = m.CreateProxySocket(100, rb::SocketType::Dgram, rb::ProtocolType::Udp);
+    ASSERT_TRUE(m.ReservePort(50000, rb::ProtocolType::Udp));
+    ASSERT_TRUE(R_SUCCEEDED(bound->Bind(LdnAddr(50000))));
+    for (s32 fd = 1; fd < static_cast<s32>(ams::mitm::bsd::MAX_PROXY_SOCKETS); fd++) {
+        ASSERT_TRUE(m.CreateProxySocket(100 + fd, rb::SocketType::Dgram, rb::ProtocolType::Udp) != nullptr);
+    }
+    ASSERT_TRUE(m.CloseProxySocket(101));  // never bound
+    ASSERT_TRUE(m.CreateProxySocket(999, rb::SocketType::Dgram, rb::ProtocolType::Udp) != nullptr);
+    ASSERT_FALSE(m.ReservePort(50000, rb::ProtocolType::Udp));  // still the bound socket's
+    m.Reset();
+    ASSERT_TRUE(m.ReservePort(50000, rb::ProtocolType::Udp));   // released by Reset
+    m.ReleasePort(50000, rb::ProtocolType::Udp);
+}
+
 // ============================================================================
 // Which sockets and datagrams are proxied (online play must keep working)
 // ============================================================================
