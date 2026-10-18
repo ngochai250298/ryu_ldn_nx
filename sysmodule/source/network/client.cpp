@@ -1215,12 +1215,11 @@ void RyuLdnClient::handle_packet(protocol::PacketId id,
             break;
         }
 
-        case protocol::PacketId::Disconnect:
-            // Server is disconnecting us
-            m_state_machine.process_event(ConnectionEvent::Disconnect);
-            break;
-
         default:
+            // Includes Disconnect: the server sends it when the host closes
+            // the room or kicks/rejects us (HostedGame.cs). It is a
+            // room-level event for the LDN layer, not a TCP teardown; the
+            // session to the server stays up.
             // Pass to user callback
             if (m_packet_callback != nullptr) {
                 m_packet_callback(id, data, size, m_packet_callback_user_data);

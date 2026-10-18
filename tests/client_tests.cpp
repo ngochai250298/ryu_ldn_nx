@@ -1500,15 +1500,25 @@ bool test_handle_packet_pong_response() {
     return true;
 }
 
+/** @brief Packet IDs seen by recording_packet_callback */
+static std::vector<PacketId> g_packets_seen;
+
+static void recording_packet_callback(PacketId id, const uint8_t*, size_t, void*) {
+    g_packets_seen.push_back(id);
+}
+
 /**
- * @brief Test that Disconnect packet from server triggers Disconnect event
+ * @brief Test that a server Disconnect packet reaches the packet callback
  *
- * Per Ryujinx: server sends PacketId::Disconnect to tell client to
- * disconnect. The client processes it via handle_packet → Disconnect event.
+ * The server sends Disconnect when the host closes the room or kicks us
+ * (HostedGame.cs). It is a room-level event for the LDN layer: the client
+ * forwards it and keeps the server session (and the TCP state) as is.
  */
 bool test_handle_packet_disconnect() {
     MockTcpClient* mock;
     auto client = make_client(mock);
+    g_packets_seen.clear();
+    client->set_packet_callback(recording_packet_callback);
 
     drive_to_ready(client.get(), mock, 1000);
 
@@ -1520,10 +1530,10 @@ bool test_handle_packet_disconnect() {
     mock->next_recv_result = ClientResult::Success;
     client->update(2000);
 
-    // Disconnect event moves state to Disconnecting (not Disconnected directly)
-    ASSERT_TRUE(client->get_state() == ConnectionState::Disconnecting
-                || client->get_state() == ConnectionState::Disconnected
-                || client->get_state() == ConnectionState::Backoff);
+    ASSERT_EQ(g_packets_seen.size(), 1);
+    ASSERT_EQ(g_packets_seen[0], PacketId::Disconnect);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
+    ASSERT_EQ(mock->disconnect_call_count, 0);
     return true;
 }
 
@@ -2408,7 +2418,7 @@ int main() {
     printf("\nhandle_packet (Ping, Disconnect, unknown):\n");
     RUN_TEST(test_handle_packet_ping_echo);
     // RUN_TEST(test_handle_packet_pong_response);
-    // RUN_TEST(test_handle_packet_disconnect);
+    RUN_TEST(test_handle_packet_disconnect);
     RUN_TEST(test_handle_packet_unknown_forwarded_to_callback);
 
     printf("\nupdate(Ready) ping paths:\n");
