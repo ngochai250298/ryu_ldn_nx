@@ -9,6 +9,7 @@
 #include "ldn_mitm_service.hpp"
 #include "ldn_shared_state.hpp"
 #include "../debug/log.hpp"
+#include "../config/config_ipc_service.hpp"
 
 namespace ams::mitm::ldn {
 
@@ -37,10 +38,13 @@ LdnMitMService::~LdnMitMService() {
 }
 
 bool LdnMitMService::ShouldMitm(const sm::MitmProcessInfo& client_info) {
-    // We always want to intercept LDN calls from applications
-    LOG_INFO("LDN ShouldMitm called for pid=%lu, program_id=0x%016lx",
-             client_info.process_id.value, client_info.program_id.value);
-    return true;
+    // Evaluated each time a process opens ldn:u, so toggling [ldn] enabled
+    // applies to the next game launch. When disabled, Atmosphere hands the
+    // game the real ldn:u service (real local wireless).
+    const bool enabled = ryu_ldn::ipc::IsLdnEnabled();
+    LOG_INFO("LDN ShouldMitm called for pid=%lu, program_id=0x%016lx, enabled=%d",
+             client_info.process_id.value, client_info.program_id.value, enabled);
+    return enabled;
 }
 
 Result LdnMitMService::CreateUserLocalCommunicationService(

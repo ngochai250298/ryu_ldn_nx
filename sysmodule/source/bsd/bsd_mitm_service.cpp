@@ -53,6 +53,7 @@
 #include "../debug/log.hpp"
 #include "../ldn/ldn_shared_state.hpp"
 #include "../config/game_whitelist.hpp"
+#include "../config/config_ipc_service.hpp"
 
 // Atmosphere MITM dispatch macros for IPC forwarding
 #include <stratosphere/sf/sf_mitm_dispatch.h>
@@ -295,10 +296,11 @@ BsdMitmService::~BsdMitmService() {
  * ## Strategy
  *
  * We intercept BSD sessions from applications that are in the LDN
- * game whitelist (fetched from Ryujinx server at startup).
+ * game whitelist (fetched from Ryujinx server at startup), while
+ * [ldn] enabled is set. System processes are never intercepted.
  *
  * @param client_info Process information (PID, program ID, etc.)
- * @return true For games in the whitelist, false otherwise
+ * @return true For games in the whitelist when LDN is enabled, false otherwise
  */
 bool BsdMitmService::ShouldMitm(const sm::MitmProcessInfo& client_info) {
     // Static counter to track all ShouldMitm calls for debugging
@@ -327,7 +329,13 @@ bool BsdMitmService::ShouldMitm(const sm::MitmProcessInfo& client_info) {
         return false;
     }
 
-    // First check: is this game in the LDN whitelist?
+    // LDN emulation disabled: leave the game's sockets untouched
+    if (!ryu_ldn::ipc::IsLdnEnabled()) {
+        LOG_INFO("BSD ShouldMitm #%u: SKIP (LDN disabled)", call_id);
+        return false;
+    }
+
+    // Is this game in the LDN whitelist?
     LOG_INFO("BSD ShouldMitm #%u: checking whitelist for 0x%016lx...", call_id, program_id);
     bool is_whitelisted = ryu_ldn::config::IsGameInWhitelist(program_id);
     LOG_INFO("BSD ShouldMitm #%u: whitelist result=%s", call_id, is_whitelisted ? "YES" : "NO");

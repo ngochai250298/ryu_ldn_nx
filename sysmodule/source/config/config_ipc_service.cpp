@@ -77,6 +77,11 @@ void InitializeConfig() {
     LOG_INFO("Config IPC: Global config initialized");
 }
 
+bool IsLdnEnabled() {
+    std::scoped_lock lk(g_config_mutex);
+    return g_config.ldn.enabled;
+}
+
 // =============================================================================
 // Internal Utilities
 // =============================================================================
