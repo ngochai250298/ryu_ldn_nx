@@ -559,6 +559,13 @@ private:
     ryu_ldn::protocol::ExternalProxyConfig m_external_proxy_config; ///< External proxy config
     p2p::P2pProxyClient* m_p2p_client;                      ///< Connected P2P proxy client (joiner side)
     p2p::P2pProxyServer* m_p2p_server;                      ///< Hosted P2P proxy server (host side)
+    /// Guards m_p2p_client/m_p2p_server for threads other than the IPC
+    /// thread that creates the server: BSD senders, the receive thread and
+    /// the connect worker. Teardown detaches a pointer under it and stops
+    /// or deletes outside it (P2pProxyServer::Stop joins session threads).
+    os::SdkMutex m_p2p_mutex;
+    /// Serialises create/join of m_p2p_connect_thread (receive thread vs IPC).
+    os::SdkMutex m_p2p_worker_mutex;
 
     // Async ExternalProxy connect thread — mirrors Ryujinx's architecture
     // where HandleExternalProxy runs on the receive thread (NetCoreServer
@@ -656,6 +663,14 @@ private:
      * @brief Disconnect from P2P proxy if connected
      */
     void DisconnectP2pProxy();
+
+    /**
+     * @brief Join the connect worker, then stop the P2P server and client
+     *
+     * Runs before DisconnectFromServer on every teardown path so no P2P
+     * thread is left using this service or its sockets.
+     */
+    void StopP2p();
 
     /**
      * @brief Start P2P proxy server for hosting

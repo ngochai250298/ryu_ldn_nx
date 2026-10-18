@@ -14,6 +14,7 @@
 #include "../bsd/proxy_socket_manager.hpp"
 #include "../bsd/bsd_mitm_service.hpp"
 #include <arpa/inet.h>
+#include <utility>
 
 namespace ams::mitm::ldn {
 
@@ -263,12 +264,12 @@ ICommunicationService::~ICommunicationService() {
     // on a black screen because it cannot open ldn:u.
     //
     // Correct order:
-    //   1. Signal the receive thread to stop
+    //   1. Signal the receive thread to stop, then join the P2P connect
+    //      worker and stop the P2P server and client
     //   2. Close the TCP socket (shutdown+close) — this unblocks recv()
     //      so the receive thread exits its polling loop immediately
     //   3. Join the now-exited receive thread (no blocking)
-    //   4. Join the P2P connect worker (uses its own socket, no dependency)
-    //   5. Stop P2P server and disconnect P2P proxy
+    //   4. Repeat the P2P stop for a worker the receive thread started
     //
     // DisconnectFromServer() calls disconnect() on the RyuLdnClient which
     // calls TcpClient::disconnect() which calls Socket::close() — that does
@@ -278,6 +279,10 @@ ICommunicationService::~ICommunicationService() {
     // Step 1: Signal the receive thread to stop
     m_recv_thread_running = false;
     m_error_event.Signal();
+
+    // Join the P2P connect worker and stop the P2P server/client before the
+    // server link goes away underneath them.
+    StopP2p();
 
     // Step 2: Close the TCP socket BEFORE joining the receive thread.
     // This unblocks recv() so the thread exits immediately.
@@ -292,18 +297,9 @@ ICommunicationService::~ICommunicationService() {
     os::DestroyThread(&m_recv_thread);
     g_recv_stacks.Release(m_stack_slot);
 
-    // Wait for any in-flight async P2P connect worker before tearing down
-    // m_p2p_client / m_external_proxy_config underneath it.
-    if (m_p2p_connect_thread_initialized) {
-        os::WaitThread(&m_p2p_connect_thread);
-        os::DestroyThread(&m_p2p_connect_thread);
-        m_p2p_connect_thread_initialized = false;
-    }
-
-    // Step 5: Stop P2P server if hosting.
-    // DisconnectFromServer() already disconnected the P2P proxy client,
-    // but StopP2pProxyServer() still needs to stop the server listener.
-    StopP2pProxyServer();
+    // Again, now the receive thread is gone: it may have started a new
+    // connect worker after the first StopP2p().
+    StopP2p();
 
     // ── Full cleanup on service destruction (fixes #44) ──────────────────
     // When a game exits (crash, Home button close, process killed), the OS
@@ -575,6 +571,7 @@ Result ICommunicationService::InitializeSystem2(u64 unk, const ams::sf::ClientPr
 Result ICommunicationService::Finalize() {
     LOG_INFO("Finalize() called");
     LeaveNetwork();
+    StopP2p();
     // Disconnect from RyuLdn server if connected
     DisconnectFromServer();
 
@@ -927,8 +924,8 @@ Result ICommunicationService::OpenAccessPoint() {
 Result ICommunicationService::CloseAccessPoint() {
     LOG_INFO("CloseAccessPoint() called");
 
-    // Stop P2P server if running (host cleanup)
-    StopP2pProxyServer();
+    // Stop the P2P worker, server and client (host cleanup)
+    StopP2p();
 
     // Leave the room (clears the network info under the lock), then the link
     LeaveNetwork();
@@ -1848,6 +1845,7 @@ void ICommunicationService::HandleServerPacket(ryu_ldn::protocol::PacketId id, c
                 const auto* state = reinterpret_cast<const ryu_ldn::protocol::ExternalProxyConnectionState*>(data);
                 LOG_INFO("Received ExternalProxyState: vIP=0x%08X connected=%u",
                          state->ip_address, static_cast<unsigned>(state->connected));
+                std::scoped_lock p2p_lock(m_p2p_mutex);
                 if (m_p2p_server != nullptr) {
                     m_p2p_server->HandleExternalProxyStateChange(state->ip_address,
                                                                  state->connected != 0);
@@ -2096,10 +2094,14 @@ void ICommunicationService::HandleExternalProxyPacket(const uint8_t* data, size_
         // the UPnP-mapped public port, or both depending on whether
         // it sees us on the same physical IP — accept either as
         // "this points at us".
-        const bool is_self_proxy = (m_p2p_server != nullptr &&
-                                    m_p2p_server->IsRunning() &&
-                                    (config->proxy_port == m_p2p_server->GetPublicPort() ||
-                                     config->proxy_port == m_p2p_server->GetPrivatePort()));
+        bool is_self_proxy;
+        {
+            std::scoped_lock p2p_lock(m_p2p_mutex);
+            is_self_proxy = (m_p2p_server != nullptr &&
+                             m_p2p_server->IsRunning() &&
+                             (config->proxy_port == m_p2p_server->GetPublicPort() ||
+                              config->proxy_port == m_p2p_server->GetPrivatePort()));
+        }
         if (is_self_proxy) {
             LOG_INFO("ExternalProxy targets our own hosted P2P server (port=%u) — skipping loopback (in-process shortcut active)",
                      config->proxy_port);
@@ -2111,6 +2113,7 @@ void ICommunicationService::HandleExternalProxyPacket(const uint8_t* data, size_
             // thread; we're called from the WaitForResponse poll loop,
             // so doing this inline would block the dispatch of the
             // `Connected` reply that arrives right after).
+            std::scoped_lock worker_lock(m_p2p_worker_mutex);
             if (!m_p2p_connect_thread_active.exchange(true)) {
                 if (m_p2p_connect_thread_initialized) {
                     os::WaitThread(&m_p2p_connect_thread);
@@ -2489,6 +2492,7 @@ ryu_ldn::network::ClientOpResult ICommunicationService::SendProxyDataToServer(
     // the in-process replacement for Ryujinx's TCP loopback design (the
     // host would otherwise dial its own P2pProxyServer to register itself
     // in _players and reuse the same SendAsync path as joiners).
+    std::unique_lock p2p_lock(m_p2p_mutex);
     if (m_p2p_server != nullptr && m_p2p_server->IsRunning()) {
         if (m_p2p_server->BroadcastFromHost(const_cast<ryu_ldn::protocol::ProxyDataHeader&>(header),
                                              static_cast<const uint8_t*>(data), data_len)) {
@@ -2514,6 +2518,7 @@ ryu_ldn::network::ClientOpResult ICommunicationService::SendProxyDataToServer(
         // Fall through to master server if P2P send fails
         LOG_WARN("P2P send failed, falling back to master server");
     }
+    p2p_lock.unlock();
 
     return m_server_client.send_proxy_data(header, static_cast<const uint8_t*>(data), data_len);
 }
@@ -2572,8 +2577,13 @@ void ICommunicationService::HandleExternalProxyConnect(
         }
     };
 
-    // Create new P2P client
-    m_p2p_client = new p2p::P2pProxyClient(packet_callback);
+    // Build the client locally and publish it only once it is ready, so
+    // senders and teardown never see one that is mid-handshake.
+    auto* client = new p2p::P2pProxyClient(packet_callback);
+    auto discard = [client]() {
+        client->Disconnect();
+        delete client;
+    };
 
     // Connect to P2P host using IP from config
     // ExternalProxyConfig has proxy_ip[16] for IPv4/IPv6
@@ -2581,33 +2591,37 @@ void ICommunicationService::HandleExternalProxyConnect(
     bool connected = false;
     if (config.address_family == 2) {  // AF_INET
         // IPv4 address - first 4 bytes of proxy_ip
-        connected = m_p2p_client->Connect(config.proxy_ip, 4, config.proxy_port);
+        connected = client->Connect(config.proxy_ip, 4, config.proxy_port);
     } else {
         LOG_WARN("Unsupported address family: %u", config.address_family);
     }
 
     if (!connected) {
         LOG_ERROR("Failed to connect to P2P host");
-        DisconnectP2pProxy();
+        discard();
         return;
     }
 
     // Perform authentication with ExternalProxyConfig
-    if (!m_p2p_client->PerformAuth(config)) {
+    if (!client->PerformAuth(config)) {
         LOG_ERROR("P2P authentication failed");
-        DisconnectP2pProxy();
+        discard();
         return;
     }
 
     // Wait for ProxyConfig response from host
-    if (!m_p2p_client->EnsureProxyReady()) {
+    if (!client->EnsureProxyReady()) {
         LOG_ERROR("P2P proxy not ready (timeout waiting for ProxyConfig)");
-        DisconnectP2pProxy();
+        discard();
         return;
     }
 
     // Store P2P proxy config
-    m_proxy_config = m_p2p_client->GetProxyConfig();
+    m_proxy_config = client->GetProxyConfig();
+    {
+        std::scoped_lock p2p_lock(m_p2p_mutex);
+        m_p2p_client = client;
+    }
     LOG_INFO("P2P connection established: virtual_ip=0x%08X",
              m_proxy_config.proxy_ip);
 
@@ -2636,12 +2650,29 @@ void ICommunicationService::HandleExternalProxyConnect(
 }
 
 void ICommunicationService::DisconnectP2pProxy() {
-    if (m_p2p_client != nullptr) {
-        LOG_INFO("Disconnecting P2P proxy client");
-        m_p2p_client->Disconnect();
-        delete m_p2p_client;
-        m_p2p_client = nullptr;
+    p2p::P2pProxyClient* client;
+    {
+        std::scoped_lock p2p_lock(m_p2p_mutex);
+        client = std::exchange(m_p2p_client, nullptr);
     }
+    if (client != nullptr) {
+        LOG_INFO("Disconnecting P2P proxy client");
+        client->Disconnect();
+        delete client;
+    }
+}
+
+void ICommunicationService::StopP2p() {
+    {
+        std::scoped_lock worker_lock(m_p2p_worker_mutex);
+        if (m_p2p_connect_thread_initialized) {
+            os::WaitThread(&m_p2p_connect_thread);
+            os::DestroyThread(&m_p2p_connect_thread);
+            m_p2p_connect_thread_initialized = false;
+        }
+    }
+    StopP2pProxyServer();
+    DisconnectP2pProxy();
 }
 
 // ============================================================================
@@ -2670,12 +2701,13 @@ bool ICommunicationService::StartP2pProxyServer() {
             self->m_server_client.send_raw_packet(data, size);
         }
     };
-    m_p2p_server = new p2p::P2pProxyServer(master_send_callback, this);
+    auto* server = new p2p::P2pProxyServer(master_send_callback, this);
 
     // Start listening on an available port
-    if (!m_p2p_server->Start()) {
+    if (!server->Start()) {
         LOG_ERROR("StartP2pProxyServer: failed to start TCP server");
-        StopP2pProxyServer();
+        server->Stop();
+        delete server;
         return false;
     }
 
@@ -2687,8 +2719,12 @@ bool ICommunicationService::StartP2pProxyServer() {
     // to ProxySocketManager::RouteIncomingData via the static callback below
     // (mirrors the relay-mode ProxyData sink in HandleServerPacket).
     constexpr uint32_t kPredictedHostIp = 0x0A720001;
-    m_p2p_server->SetHostVirtualIp(kPredictedHostIp);
-    m_p2p_server->SetHostDataCallback(HostP2pInboundDataCallback, this);
+    server->SetHostVirtualIp(kPredictedHostIp);
+    server->SetHostDataCallback(HostP2pInboundDataCallback, this);
+    {
+        std::scoped_lock p2p_lock(m_p2p_mutex);
+        m_p2p_server = server;
+    }
 
     LOG_INFO("StartP2pProxyServer: server started on port %u",
              m_p2p_server->GetPrivatePort());
@@ -2696,16 +2732,21 @@ bool ICommunicationService::StartP2pProxyServer() {
 }
 
 void ICommunicationService::StopP2pProxyServer() {
-    if (m_p2p_server != nullptr) {
+    // Detach under the lock, stop outside it: Stop() joins session threads.
+    p2p::P2pProxyServer* server;
+    {
+        std::scoped_lock p2p_lock(m_p2p_mutex);
+        server = std::exchange(m_p2p_server, nullptr);
+    }
+    if (server != nullptr) {
         LOG_INFO("StopP2pProxyServer: stopping P2P server");
 
         // Release UPnP port mapping
-        m_p2p_server->ReleaseNatPunch();
+        server->ReleaseNatPunch();
 
         // Stop server and delete
-        m_p2p_server->Stop();
-        delete m_p2p_server;
-        m_p2p_server = nullptr;
+        server->Stop();
+        delete server;
     }
 }
 
@@ -2722,6 +2763,7 @@ void ICommunicationService::HandleExternalProxyToken(
 {
     // Like Ryujinx HandleExternalProxyToken - add token to waiting list
     // Called when master server notifies us a joiner is about to connect
+    std::scoped_lock p2p_lock(m_p2p_mutex);
     if (m_p2p_server != nullptr && m_p2p_server->IsRunning()) {
         LOG_INFO("HandleExternalProxyToken: adding token for expected joiner");
         m_p2p_server->AddWaitingToken(token);
