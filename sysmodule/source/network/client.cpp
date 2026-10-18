@@ -284,6 +284,7 @@ RyuLdnClient::RyuLdnClient(RyuLdnClient&& other) noexcept
     , m_handshake_start_time_ms(other.m_handshake_start_time_ms)
     , m_handshake_timeout_ms(other.m_handshake_timeout_ms)
     , m_last_error_code(other.m_last_error_code)
+    , m_last_connect_result(other.m_last_connect_result)
     , m_last_pong_time_ms(other.m_last_pong_time_ms)
     , m_ping_timeout_ms(other.m_ping_timeout_ms)
     , m_pending_ping_count(other.m_pending_ping_count)
@@ -324,6 +325,7 @@ RyuLdnClient& RyuLdnClient::operator=(RyuLdnClient&& other) noexcept {
         m_handshake_start_time_ms = other.m_handshake_start_time_ms;
         m_handshake_timeout_ms = other.m_handshake_timeout_ms;
         m_last_error_code = other.m_last_error_code;
+        m_last_connect_result = other.m_last_connect_result;
         m_last_pong_time_ms = other.m_last_pong_time_ms;
         m_ping_timeout_ms = other.m_ping_timeout_ms;
         m_pending_ping_count = other.m_pending_ping_count;
@@ -743,6 +745,13 @@ protocol::NetworkErrorCode RyuLdnClient::get_last_error_code() const {
 }
 
 /**
+ * @brief Get the result of the most recent transport connect attempt
+ */
+ClientResult RyuLdnClient::get_last_connect_result() const {
+    return m_last_connect_result;
+}
+
+/**
  * @brief Get last measured round-trip time
  *
  * @return RTT in milliseconds (0 if no ping completed yet)
@@ -1100,6 +1109,7 @@ void RyuLdnClient::try_connect() {
         m_config.port,
         m_config.connect_timeout_ms
     );
+    m_last_connect_result = result;
 
     if (result == ClientResult::Success) {
         LOG_INFO("TCP connection established");

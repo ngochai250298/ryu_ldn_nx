@@ -64,7 +64,7 @@ void LogConfigWarnings() {
     char first[96];
     uint32_t n = config::take_config_warnings(first, sizeof(first));
     if (n > 0) {
-        LOG_WARN("Config: %u invalid value(s) in config.ini, defaults kept (first: %s)", n, first);
+        LOG_WARN("Config: %u warning(s) in config.ini (first: %s)", n, first);
     }
 }
 }  // namespace
@@ -93,6 +93,11 @@ void InitializeConfig() {
 bool IsLdnEnabled() {
     std::scoped_lock lk(g_config_mutex);
     return g_config.ldn.enabled;
+}
+
+uint64_t GetRealWirelessButton() {
+    std::scoped_lock lk(g_config_mutex);
+    return g_config.ldn.real_wireless_button;
 }
 
 // =============================================================================

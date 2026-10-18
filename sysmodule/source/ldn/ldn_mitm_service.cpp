@@ -10,6 +10,7 @@
 #include "ldn_shared_state.hpp"
 #include "ldn_helpers.hpp"
 #include "../debug/log.hpp"
+#include "ldn_route.hpp"
 #include "../config/config_ipc_service.hpp"
 
 namespace ams::mitm::ldn {
@@ -39,19 +40,31 @@ LdnMitMService::~LdnMitMService() {
 }
 
 bool LdnMitMService::ShouldMitm(const sm::MitmProcessInfo& client_info) {
-    // Evaluated each time a process opens ldn:u, so toggling [ldn] enabled
-    // applies to the next game launch. When disabled, Atmosphere hands the
-    // game the real ldn:u service (real local wireless).
-    const bool enabled = ryu_ldn::ipc::IsLdnEnabled();
-    LOG_INFO("LDN ShouldMitm called for pid=%lu, program_id=0x%016lx, enabled=%d",
-             client_info.process_id.value, client_info.program_id.value, enabled);
-    return enabled;
+    // We always want to intercept LDN calls from applications.
+    // Relay or real radio is decided per session in
+    // CreateUserLocalCommunicationService (no IPC here: sm waits on us).
+    LOG_INFO("LDN ShouldMitm called for pid=%lu, program_id=0x%016lx",
+             client_info.process_id.value, client_info.program_id.value);
+    return true;
 }
 
 Result LdnMitMService::CreateUserLocalCommunicationService(
     sf::Out<sf::SharedPointer<ICommunicationInterface>> out)
 {
-    LOG_INFO("Creating UserLocalCommunicationService for program_id=0x%016lx", m_program_id.value);
+    // Decided each time the game starts Local Wireless, like ldn_mitm's
+    // enable switch: forwarding hands the game Nintendo's real service.
+    u32 ip = 0;
+    const bool online = R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) && ip != 0;
+    const bool enabled = ryu_ldn::ipc::IsLdnEnabled();
+    const u64 button = ryu_ldn::ipc::GetRealWirelessButton();
+    const u64 keys = m_client_info.override_status.GetKeysHeld();
+    const bool relay = ryu_ldn::ldn::UseRelay(enabled, online, button, keys);
+    LOG_INFO("CreateUserLocalCommunicationService: program_id=0x%016lx enabled=%d online=%d button=0x%lx keys=0x%lx -> %s",
+             m_program_id.value, enabled, online, button, keys, relay ? "relay" : "real wireless");
+
+    SharedState::GetInstance().SetRealWirelessPid(relay ? 0 : m_client_pid);
+    R_UNLESS(relay, sm::mitm::ResultShouldForwardToSession());
+
     // Create our custom communication service with the client's program ID
     // The program_id is used to replace LocalCommunicationId=-1 with the real title ID
     // Each instance runs its receive thread on its own stack; refuse rather

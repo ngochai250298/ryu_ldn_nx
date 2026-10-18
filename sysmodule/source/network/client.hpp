@@ -421,6 +421,16 @@ public:
     protocol::NetworkErrorCode get_last_error_code() const;
 
     /**
+     * @brief Get the result of the most recent transport connect attempt
+     *
+     * Tells why the relay could not be reached (unreachable, TLS, rejected),
+     * so the LDN service can return a cause-specific error to the game.
+     *
+     * @return ClientResult of the last ITcpClient::connect() call
+     */
+    ClientResult get_last_connect_result() const;
+
+    /**
      * @brief Get last measured round-trip time
      *
      * Returns the RTT from the most recent ping/pong exchange.
@@ -596,6 +606,7 @@ private:
     uint64_t m_handshake_start_time_ms;     ///< Time when handshake was initiated
     uint32_t m_handshake_timeout_ms;        ///< Handshake timeout (default: 5000ms)
     protocol::NetworkErrorCode m_last_error_code; ///< Last error from server
+    ClientResult m_last_connect_result = ClientResult::Success; ///< Last transport connect() result
 
     uint64_t m_last_pong_time_ms;           ///< Time when last pong was received
     uint32_t m_ping_timeout_ms;             ///< Ping response timeout (default: 10000ms)

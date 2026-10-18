@@ -726,6 +726,103 @@ TEST(parse_bool_invalid_keeps_default_and_warns) {
     ASSERT_EQ(take_config_warnings(nullptr, 0), 0u);  // reset
 }
 
+// ---- [ldn] real_wireless_button ----
+
+constexpr uint64_t BTN_A = 1ULL << 0, BTN_L = 1ULL << 6, BTN_R = 1ULL << 7;
+constexpr uint64_t BTN_ZL = 1ULL << 8, BTN_ZR = 1ULL << 9, BTN_PLUS = 1ULL << 10;
+constexpr uint64_t BTN_LSTICK = 1ULL << 4, BTN_DDOWN = 1ULL << 15;
+
+/// Load `real_wireless_button = <value>` over the defaults; returns the warning count
+static uint32_t load_button(const char* value, uint64_t& mask, char* first = nullptr, size_t first_size = 0) {
+    take_config_warnings(nullptr, 0);
+    std::string text = std::string("[ldn]\nreal_wireless_button =") + value + "\n";
+    TempConfigFile file(text.c_str());
+    Config config = get_default_config();
+    if (load_config(file.path(), config) != ConfigResult::Success) throw 1;
+    mask = config.ldn.real_wireless_button;
+    return take_config_warnings(first, first_size);
+}
+
+TEST(real_wireless_button_default_is_zr) {
+    ASSERT_EQ(get_default_config().ldn.real_wireless_button, BTN_ZR);
+}
+
+TEST(real_wireless_button_parses_names_and_combos) {
+    uint64_t mask = 0;
+    ASSERT_EQ(load_button(" ZL", mask), 0u);
+    ASSERT_EQ(mask, BTN_ZL);
+    ASSERT_EQ(load_button(" zl+Zr", mask), 0u);
+    ASSERT_EQ(mask, BTN_ZL | BTN_ZR);
+    ASSERT_EQ(load_button(" ZL + ZR", mask), 0u);
+    ASSERT_EQ(mask, BTN_ZL | BTN_ZR);
+    ASSERT_EQ(load_button(" a\t+ plus +lstick+ DDown ", mask), 0u);
+    ASSERT_EQ(mask, BTN_A | BTN_PLUS | BTN_LSTICK | BTN_DDOWN);
+    ASSERT_EQ(load_button(" none", mask), 0u);
+    ASSERT_EQ(mask, 0u);
+    ASSERT_EQ(load_button(" NONE", mask), 0u);
+    ASSERT_EQ(mask, 0u);
+}
+
+TEST(real_wireless_button_every_name_has_its_bit) {
+    const char* names[] = {"A", "B", "X", "Y", "L", "R", "ZL", "ZR", "PLUS", "MINUS",
+                           "LSTICK", "RSTICK", "DLEFT", "DUP", "DRIGHT", "DDOWN"};
+    const int bits[] = {0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 4, 5, 12, 13, 14, 15};
+    for (int i = 0; i < 16; i++) {
+        uint64_t mask = 0;
+        load_button(names[i], mask);
+        ASSERT_EQ(mask, 1ULL << bits[i]);
+    }
+}
+
+TEST(real_wireless_button_garbage_keeps_default_and_warns) {
+    const char* bad[] = {"", "  ", "ZT", "ZR+", "+ZR", "ZL++ZR", "ZL ZR", "none+ZR", "Z R", "ZR,ZL", "nonee"};
+    for (const char* value : bad) {
+        uint64_t mask = 0;
+        char first[96];
+        ASSERT_EQ(load_button(value, mask, first, sizeof(first)), 1u);
+        ASSERT_EQ(mask, BTN_ZR);
+        ASSERT_TRUE(strstr(first, "real_wireless_button") != nullptr);
+    }
+}
+
+TEST(real_wireless_button_l_or_r_accepted_with_warning) {
+    uint64_t mask = 0;
+    char first[96];
+    ASSERT_EQ(load_button(" R", mask, first, sizeof(first)), 1u);
+    ASSERT_EQ(mask, BTN_R);
+    ASSERT_TRUE(strstr(first, "Atmosphere") != nullptr);
+    ASSERT_EQ(load_button(" L+ZR", mask, first, sizeof(first)), 1u);
+    ASSERT_EQ(mask, BTN_L | BTN_ZR);
+    ASSERT_TRUE(strstr(first, "Atmosphere") != nullptr);
+    ASSERT_EQ(load_button(" ZL+ZR", mask), 0u);
+}
+
+TEST(real_wireless_button_save_round_trip_is_canonical) {
+    struct { const char* in; const char* saved; uint64_t mask; } cases[] = {
+        {"zr+zl", "ZL+ZR", BTN_ZL | BTN_ZR},
+        {" ddown + A ", "A+DDOWN", BTN_A | BTN_DDOWN},
+        {"None", "none", 0},
+        {"ZR", "ZR", BTN_ZR},
+    };
+    for (const auto& c : cases) {
+        uint64_t mask = 0;
+        load_button(c.in, mask);
+        ASSERT_EQ(mask, c.mask);
+        Config config = get_default_config();
+        config.ldn.real_wireless_button = mask;
+        char path[256];
+        snprintf(path, sizeof(path), "/tmp/test_button_rt_%d.ini", rand());
+        ASSERT_EQ(save_config(path, config), ConfigResult::Success);
+        std::string text = read_all(path);
+        Config again = get_default_config();
+        ASSERT_EQ(load_config(path, again), ConfigResult::Success);
+        std::remove(path);
+        ASSERT_TRUE(text.find(std::string("real_wireless_button = ") + c.saved + "\n") != std::string::npos);
+        ASSERT_EQ(again.ldn.real_wireless_button, c.mask);
+    }
+    take_config_warnings(nullptr, 0);
+}
+
 // ---- IPC string copy (real copy_ipc_string used by SetPassphrase/SetServerAddress) ----
 
 TEST(ipc_string_copy_accepts_terminated_printable) {

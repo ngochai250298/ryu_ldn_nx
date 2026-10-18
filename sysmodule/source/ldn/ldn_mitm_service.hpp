@@ -50,11 +50,11 @@ public:
      * @brief Determine if we should MITM this process
      *
      * This is called by Atmosphere to determine if we should intercept
-     * calls from a specific process. Intercepts while [ldn] enabled is set;
-     * otherwise the process gets the real ldn:u service.
+     * calls from a specific process. We always return true to intercept
+     * all LDN calls.
      *
      * @param client_info Process information for the client
-     * @return true if LDN emulation is enabled
+     * @return true Always intercept
      */
     /// @gdb{tag="LDN:LIFECYCLE", msg="ShouldMitm check"}
     static bool ShouldMitm(const sm::MitmProcessInfo& client_info);
@@ -65,7 +65,10 @@ public:
      *
      * This is the main entry point for games. When they call
      * CreateUserLocalCommunicationService, we create our custom
-     * ICommunicationService that communicates with the RyuLdn server.
+     * ICommunicationService that communicates with the RyuLdn server,
+     * or forward to the real ldn:u (real radio) when [ldn] enabled = 0,
+     * the console is offline, or the real-wireless button was held at
+     * launch (see ldn_route.hpp).
      *
      * @param out Output pointer for the created service
      * @return Result code

@@ -145,6 +145,28 @@ public:
      */
     bool ReleaseGame(u64 pid);
 
+    /**
+     * @brief Record which process's Local Wireless went to the real ldn:u
+     *
+     * Set when CreateUserLocalCommunicationService forwards to Nintendo's
+     * service; cleared (0) when it serves the session from the relay.
+     * bsd:u stops creating proxy sockets for this process, so its LDN
+     * sockets reach the real radio.
+     *
+     * @param pid Process ID using real Local Wireless, or 0 to clear
+     */
+    /// @gdb{tag="LDN:STATE", msg="SetRealWirelessPid: pid=%lu", args="$x1"}
+    void SetRealWirelessPid(u64 pid);
+
+    /**
+     * @brief Check if a process's Local Wireless went to the real ldn:u
+     *
+     * @param pid Process ID to check
+     * @return true if bsd:u must not proxy this process's sockets
+     */
+    /// @gdb{tag="LDN:STATE", msg="IsRealWirelessPid: pid=%lu", args="$x1"}
+    bool IsRealWirelessPid(u64 pid) const;
+
     // =========================================================================
     // LDN Game Whitelist (for BSD MITM)
     // =========================================================================
@@ -326,6 +348,7 @@ private:
     bool m_game_active = false;
     u64 m_process_id = 0;
     u64 m_ldn_pid = 0;  ///< PID that opened ldn:u (set before Initialize)
+    u64 m_real_wireless_pid = 0;  ///< PID whose ldn:u was forwarded to the real service
     CommState m_ldn_state = static_cast<CommState>(0); // CommState::None
     u8 m_node_count = 0;
     u8 m_max_nodes = 0;

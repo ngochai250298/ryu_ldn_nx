@@ -93,6 +93,16 @@ bool SharedState::ReleaseGame(u64 pid) {
     return m_ldn_pid == 0;
 }
 
+void SharedState::SetRealWirelessPid(u64 pid) {
+    std::scoped_lock lk(m_mutex);
+    m_real_wireless_pid = pid;
+}
+
+bool SharedState::IsRealWirelessPid(u64 pid) const {
+    std::scoped_lock lk(m_mutex);
+    return m_real_wireless_pid != 0 && m_real_wireless_pid == pid;
+}
+
 // =============================================================================
 // LDN Game Whitelist (for BSD MITM)
 // =============================================================================

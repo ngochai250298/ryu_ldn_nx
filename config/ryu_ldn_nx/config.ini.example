@@ -30,6 +30,15 @@ passphrase =
 ; WARNING: Setting to 0 enables P2P proxy which is experimental and incomplete.
 ; Keep at 1 (relay-only) for stable gameplay.
 disable_p2p = 1
+; Hold this button while launching a game (from the HOME menu, until the
+; game starts loading) to give that launch real local wireless instead of
+; the server. Holding it later, once the game is running, does nothing.
+; Names: A B X Y L R ZL ZR PLUS MINUS LSTICK RSTICK DLEFT DUP DRIGHT DDOWN
+; (case-insensitive). Join with + for a combo that must all be held, e.g.
+; ZL+ZR. none = no button.
+; Avoid L and R: Atmosphere also reads them at launch (holding L starts the
+; game without mods/cheats, holding R opens the homebrew menu instead).
+real_wireless_button = ZR
 
 [debug]
 ; Enable debug logging (0/1/true/false/yes/no)

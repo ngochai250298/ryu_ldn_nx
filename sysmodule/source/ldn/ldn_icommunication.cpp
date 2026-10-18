@@ -9,6 +9,7 @@
 #include "ldn_icommunication.hpp"
 #include "ldn_shared_state.hpp"
 #include "ldn_helpers.hpp"
+#include "ldn_route.hpp"
 #include "../config/config_ipc_service.hpp"
 #include "../debug/log.hpp"
 #include "../bsd/proxy_socket_manager.hpp"
@@ -402,15 +403,18 @@ Result ICommunicationService::ConnectToServer() {
         if (result != ryu_ldn::network::ClientOpResult::Success) {
             LOG_ERROR("Server connection initiation failed: %s",
                       ryu_ldn::network::client_op_result_to_string(result));
-            R_RETURN(LdnResult(helpers::desc::DeviceNotAvailable)); // Connection initiation failed
+            R_RETURN(MAKERESULT(0x10, ryu_ldn::ldn::ResultDescRelayUnreachable)); // 2016-0101
         }
 
         // connect() returns Success even when try_connect() fails (wrong state
         // machine path, DNS failure, TCP refused, etc.). Verify TCP established.
         if (!m_server_client.is_connected()) {
-            LOG_ERROR("TCP connection to server failed (state=%d)",
-                      static_cast<int>(m_server_client.get_state()));
-            R_RETURN(LdnResult(helpers::desc::DeviceNotAvailable)); // TCP connection failed
+            const auto connect_result = m_server_client.get_last_connect_result();
+            LOG_ERROR("Connection to server failed (state=%d, result=%s)",
+                      static_cast<int>(m_server_client.get_state()),
+                      ryu_ldn::network::client_result_to_string(connect_result));
+            // Unreachable, TLS or rejected: 2016-0101 .. 2016-0103 on the game's error screen
+            R_RETURN(MAKERESULT(0x10, ryu_ldn::ldn::RelayConnectFailureDesc(connect_result)));
         }
     }
 
@@ -465,7 +469,7 @@ Result ICommunicationService::ConnectToServer() {
             } else {
                 LOG_ERROR("Handshake timeout or failed");
                 m_server_client.disconnect();
-                R_RETURN(LdnResult(helpers::desc::DeviceNotAvailable)); // Handshake timeout
+                R_RETURN(MAKERESULT(0x10, ryu_ldn::ldn::ResultDescRelayHandshake)); // 2016-0104
             }
         }
     }
@@ -774,13 +778,11 @@ Result ICommunicationService::Scan(
 
     // Reconnect on demand, like Ryujinx Scan -> EnsureConnected(): the
     // inactivity timeout drops the link 6 s after leaving a room while the
-    // game is still in Station state. Like Ryujinx, a scan that cannot
-    // reach the server finds no networks rather than failing.
-    if (R_FAILED(ConnectToServer())) {
-        LOG_WARN("Scan: server unreachable, returning no networks");
-        count.SetValue(0);
-        R_SUCCEED();
-    }
+    // game is still in Station state. Unlike Ryujinx, a scan that cannot
+    // reach the server fails with the cause (2016-0101..0104) instead of
+    // finding no networks: Scan is the first call a joining console makes
+    // after OpenStation, so it is where that console's player sees why.
+    R_TRY(ConnectToServer());
 
     // Reset scan results buffer and events (like Ryujinx _availableGames.Clear() and _scan.Reset())
     {
@@ -973,8 +975,10 @@ Result ICommunicationService::CreateNetwork(const CreateNetworkConfig &data) {
     m_inactivity_timeout.DisableTimeout();
 
     // Reconnect if the inactivity timeout dropped the link (EnsureConnected).
-    // Ryujinx AccessPoint.CreateNetwork reports any failure as InvalidState.
-    R_UNLESS(R_SUCCEEDED(ConnectToServer()), LdnResult(helpers::desc::InvalidState));
+    // Ryujinx AccessPoint.CreateNetwork reports any failure as InvalidState;
+    // a failed relay connect returns its cause (2016-0101..0104) instead,
+    // since OpenAccessPoint no longer fails on the network.
+    R_TRY(ConnectToServer());
 
     auto result = m_state_machine.CreateNetwork();
     if (result != StateTransitionResult::Success) {
@@ -1413,7 +1417,7 @@ Result ICommunicationService::CreateNetworkPrivate(
     // so it doesn't fire mid-handshake and tear down the master TCP while
     // m_network_connected is still false; then reconnect if needed.
     m_inactivity_timeout.DisableTimeout();
-    R_UNLESS(R_SUCCEEDED(ConnectToServer()), LdnResult(helpers::desc::InvalidState));
+    R_TRY(ConnectToServer());  // 2016-0101..0104, as in CreateNetwork
 
     auto result = m_state_machine.CreateNetwork();
     if (result != StateTransitionResult::Success) {

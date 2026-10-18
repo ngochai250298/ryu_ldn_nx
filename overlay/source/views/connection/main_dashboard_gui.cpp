@@ -133,7 +133,7 @@ void MainDashboardGui::BuildNavSection(tsl::elm::List* list) {
 }
 
 void MainDashboardGui::BuildLdnSection(tsl::elm::List* list) {
-    list->addItem(new tsl::elm::CategoryHeader("LDN Settings : Applies on next game launch"));
+    list->addItem(new tsl::elm::CategoryHeader("LDN Settings : Applies on next Local Wireless"));
 
     // LDN Enabled toggle (copied from AdvancedSettingsGui::BuildLdnSection)
     m_ldnToggle = new tsl::elm::ToggleListItem("LDN Enabled", true);
