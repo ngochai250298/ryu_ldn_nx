@@ -269,6 +269,11 @@ void Logger::output_message(const char* message) {
                                ams::fs::WriteOption::None);
             m_file_offset += msg_len + 1;
 
+            // Over the cap: close now, the next message reopens and rotates
+            if (m_file_offset >= MAX_LOG_FILE_SIZE) {
+                close_file();
+            }
+
             // Update last write time
             m_last_write_tick = armGetSystemTick();
         }
@@ -276,6 +281,12 @@ void Logger::output_message(const char* message) {
         if (m_file != nullptr) {
             std::fprintf(static_cast<FILE*>(m_file), "%s\n", message);
             std::fflush(static_cast<FILE*>(m_file));
+
+            // Over the cap: close now, the next message reopens and rotates
+            long pos = std::ftell(static_cast<FILE*>(m_file));
+            if (pos >= 0 && static_cast<size_t>(pos) >= MAX_LOG_FILE_SIZE) {
+                close_file();
+            }
 
             // Update last write time (simple incrementing counter for non-Switch)
             m_last_write_tick++;
@@ -320,6 +331,25 @@ void Logger::open_file() {
                 m_file_offset = static_cast<size_t>(file_size);
             }
 
+            // Rotate: a verbose session otherwise grows the SD log forever.
+            // Horizon rename cannot replace, so delete the old .1 first.
+            if (m_file_offset >= MAX_LOG_FILE_SIZE) {
+                ams::fs::CloseFile(s_log_file_handle);
+                m_file_open = false;
+                char old_path[sizeof(m_log_path) + 3];
+                std::snprintf(old_path, sizeof(old_path), "%s.1", m_log_path);
+                ams::fs::DeleteFile(old_path);
+                ams::fs::RenameFile(m_log_path, old_path);
+                m_file_offset = 0;
+                if (R_SUCCEEDED(ams::fs::CreateFile(m_log_path, 0)) &&
+                    R_SUCCEEDED(ams::fs::OpenFile(&s_log_file_handle, m_log_path,
+                                ams::fs::OpenMode_Write | ams::fs::OpenMode_AllowAppend))) {
+                    m_file_open = true;
+                } else {
+                    return;
+                }
+            }
+
             // Write header only once per session
             if (!m_header_written) {
                 const char* header = "\n=== ryu_ldn_nx Log Started ===\n";
@@ -337,6 +367,21 @@ void Logger::open_file() {
     // The Switch SD card uses FAT32/exFAT which has no POSIX permission
     // model — fopen("a") creates with default FAT attributes and chmod is
     // a no-op on this filesystem.  // codeql[cpp/world-writable-file-creation]
+    {
+        // Rotate an oversized log to <log>.1 (same policy as the Switch build)
+        FILE* probe = std::fopen(m_log_path, "rb");
+        if (probe) {
+            std::fseek(probe, 0, SEEK_END);
+            long size = std::ftell(probe);
+            std::fclose(probe);
+            if (size >= 0 && static_cast<size_t>(size) >= MAX_LOG_FILE_SIZE) {
+                char old_path[sizeof(m_log_path) + 3];
+                std::snprintf(old_path, sizeof(old_path), "%s.1", m_log_path);
+                std::remove(old_path);
+                std::rename(m_log_path, old_path);
+            }
+        }
+    }
     m_file = std::fopen(m_log_path, "a");
 
     if (m_file != nullptr) {
