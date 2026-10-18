@@ -10,6 +10,7 @@
  */
 
 #include "views/settings/advanced_settings_gui.hpp"
+#include "app/config_actions.hpp"
 #include "app/overlay_state.hpp"
 
 #include "ryu_ldn_ipc.h"
@@ -18,6 +19,8 @@ AdvancedSettingsGui::AdvancedSettingsGui() {
 }
 
 AdvancedSettingsGui::~AdvancedSettingsGui() {
+    // Leaving the page (back, or the overlay closing) must not lose changes
+    SaveIfDirty();
 }
 
 tsl::elm::Element* AdvancedSettingsGui::createUI() {
@@ -133,7 +136,7 @@ void AdvancedSettingsGui::RefreshServerAddress() {
 
 void AdvancedSettingsGui::update() {
     m_refreshCounter++;
-    if (m_refreshCounter >= 60) {
+    if (m_refreshCounter >= 30) {
         m_refreshCounter = 0;
         // Always refresh server address (read-only display, not affected by edit locks)
         RefreshServerAddress();

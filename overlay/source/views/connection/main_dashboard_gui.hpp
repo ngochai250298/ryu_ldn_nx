@@ -15,6 +15,7 @@
 #include <tesla.hpp>
 
 #include "app/auto_save_controller.hpp"
+#include "ryu_ldn_ipc.h"
 
 class MainDashboardGui : public tsl::Gui {
 public:
@@ -44,7 +45,9 @@ private:
     tsl::elm::ToggleListItem* m_ldnToggle = nullptr;
     tsl::elm::ToggleListItem* m_passphraseEnabledToggle = nullptr;
 
+    static constexpr u32 PollFrames = 30;
     u32 m_refreshCounter = 0;
+    RyuLdnConnectionStatus m_cachedStatus = RyuLdnStatus_Disconnected;
     AutoSaveController m_autoSaveController;
 
     /** @brief Cached info line built in RefreshConnectionValues, used in update() subtitle. */

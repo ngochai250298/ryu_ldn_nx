@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include "../overlay/source/app/save_backoff.hpp"
 
 //=============================================================================
 // Mock Switch/libnx types for testing
@@ -386,6 +387,43 @@ TEST(format_latency_max_u32) {
 }
 
 //=============================================================================
+// Auto-save schedule (real SaveBackoff from overlay/source/app)
+//=============================================================================
+
+TEST(save_backoff_fires_after_delay_when_dirty) {
+    SaveBackoff b;
+    for (u32 i = 1; i < SaveBackoff::AutoSaveDelayFrames; i++) ASSERT(!b.Due(true));
+    ASSERT(b.Due(true));
+    ASSERT(!b.Due(true));  // counter restarted
+}
+
+TEST(save_backoff_clean_never_fires) {
+    SaveBackoff b;
+    for (u32 i = 0; i < 1000; i++) ASSERT(!b.Due(false));
+}
+
+TEST(save_backoff_waits_after_failure) {
+    SaveBackoff b;
+    u32 frames = 0;
+    while (!b.Due(true)) frames++;
+    b.Failed();
+    u32 until_retry = 0;
+    while (!b.Due(true)) until_retry++;
+    ASSERT(until_retry >= SaveBackoff::FailBackoffFrames);  // not retried every second
+    (void)frames;
+}
+
+TEST(save_backoff_resets_when_clean) {
+    SaveBackoff b;
+    while (!b.Due(true)) {}
+    b.Failed();
+    ASSERT(!b.Due(false));  // saved by some other path: backoff cleared
+    u32 n = 0;
+    while (!b.Due(true)) n++;
+    ASSERT(n + 1 == SaveBackoff::AutoSaveDelayFrames);
+}
+
+//=============================================================================
 // Main
 //=============================================================================
 
@@ -437,6 +475,12 @@ int main() {
     RUN_TEST(session_info_zero_initialized);
     RUN_TEST(connection_status_enum_values);
     RUN_TEST(ldn_state_enum_values);
+
+    printf("\n--- Auto-save Schedule Tests ---\n");
+    RUN_TEST(save_backoff_fires_after_delay_when_dirty);
+    RUN_TEST(save_backoff_clean_never_fires);
+    RUN_TEST(save_backoff_waits_after_failure);
+    RUN_TEST(save_backoff_resets_when_clean);
 
     printf("\n--- Edge Cases ---\n");
     RUN_TEST(format_session_buffer_small);

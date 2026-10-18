@@ -231,9 +231,10 @@ void MainDashboardGui::RefreshPassphrase() {
 }
 
 void MainDashboardGui::update() {
-    m_refreshCounter++;
-    if (m_refreshCounter >= 60) {
-        m_refreshCounter = 0;
+    // Poll the sysmodule every PollFrames (~0.5 s) instead of every frame:
+    // each ryu:cfg call is a round trip and a verbose log line on the sysmodule.
+    bool poll = (m_refreshCounter++ % PollFrames) == 0;
+    if (poll) {
         RefreshConnectionValues();
         RefreshPassphrase();
     }
@@ -241,8 +242,11 @@ void MainDashboardGui::update() {
 
     // Dynamic subtitle: connection status + save indicator
     if (m_frame) {
-        RyuLdnConfigService* svc = ryuLdnGetService();
-        RyuLdnConnectionStatus currentStatus = RyuLdnStatus_Disconnected;
+        if (poll) {
+            m_cachedStatus = RyuLdnStatus_Disconnected;
+        }
+        RyuLdnConnectionStatus currentStatus = m_cachedStatus;
+        RyuLdnConfigService* svc = poll ? ryuLdnGetService() : nullptr;
         if (svc) {
             RyuLdnState ldnState;
             if (R_SUCCEEDED(ryuLdnGetLdnState(svc, &ldnState))) {
@@ -266,6 +270,7 @@ void MainDashboardGui::update() {
                         break;
                 }
             }
+            m_cachedStatus = currentStatus;
         }
 
         // Build subtitle: status dot + save indicator + info line
@@ -298,7 +303,7 @@ void MainDashboardGui::update() {
     }
 
     // Refresh passphrase toggle: lock/unlock and sync state when passphrase changes
-    if (m_passphraseEnabledToggle) {
+    if (poll && m_passphraseEnabledToggle) {
         RyuLdnConfigService* svc = ryuLdnGetService();
         if (svc) {
             char passphrase[64] = {0};
