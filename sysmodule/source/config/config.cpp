@@ -218,7 +218,14 @@ void parse_config_content(const char* content, size_t size, Config& config) {
     Section current_section = Section::None;
     size_t line_pos = 0;
 
+    // Editors like old Notepad save UTF-8 with a BOM; without this the first
+    // line reads "\xEF\xBB\xBF[server]" and the whole section is ignored.
     size_t i = 0;
+    if (size >= 3 && static_cast<unsigned char>(content[0]) == 0xEF &&
+        static_cast<unsigned char>(content[1]) == 0xBB &&
+        static_cast<unsigned char>(content[2]) == 0xBF) {
+        i = 3;
+    }
     while (i <= size) {
         // End of line or end of content
         if (i == size || content[i] == '\n' || content[i] == '\r') {

@@ -6,6 +6,7 @@
  */
 
 #include "config/config.hpp"
+#include "config/whitelist_parser.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -13,6 +14,8 @@
 #include <fstream>
 #include <string>
 #include <iterator>
+#include <vector>
+#include <algorithm>
 
 using namespace ryu_ldn::config;
 
@@ -636,6 +639,61 @@ TEST(ensure_config_exists_ignores_tmp_when_config_present) {
     std::remove(path);
     std::remove(tmp);
     ASSERT_EQ(loaded.server.port, 1);
+}
+
+TEST(utf8_bom_does_not_hide_first_section) {
+    TempConfigFile file("\xEF\xBB\xBF[server]\nhost = bom.example\nport = 99\n[ldn]\npassphrase = x\n");
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+    ASSERT_STREQ(config.server.host, "bom.example");
+    ASSERT_EQ(config.server.port, 99);
+    ASSERT_STREQ(config.ldn.passphrase, "x");
+}
+
+TEST(bom_only_skipped_at_file_start) {
+    TempConfigFile file("[server]\nhost = a.example\n\xEF\xBB\xBFport = 5\n");
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+    ASSERT_STREQ(config.server.host, "a.example");
+    ASSERT_EQ(config.server.port, DEFAULT_PORT);  // BOM mid-file is not special
+}
+
+// ---- gamelist.txt scanner (the real WhitelistScanner from the sysmodule) ----
+
+static std::vector<uint64_t> scan_chunks(const std::string& text, size_t chunk) {
+    std::vector<uint64_t> ids;
+    ryu_ldn::config::WhitelistScanner sc;
+    auto emit = [&](uint64_t id) { ids.push_back(id); };
+    for (size_t i = 0; i < text.size(); i += chunk) {
+        sc.Feed(text.data() + i, std::min(chunk, text.size() - i), emit);
+    }
+    sc.Finish(emit);
+    return ids;
+}
+
+TEST(whitelist_bom_indent_and_endings) {
+    std::string text = "\xEF\xBB\xBF" "0x0100152000022000\r\n  0x01006A800016E000\n\t0100000000010000\r"
+                       "# comment\n\n0x0100000000020000";
+    for (size_t chunk : {size_t(1), size_t(3), size_t(512)}) {
+        auto ids = scan_chunks(text, chunk);
+        ASSERT_EQ(ids.size(), 4u);
+        ASSERT_EQ(ids[0], 0x0100152000022000ULL);
+        ASSERT_EQ(ids[1], 0x01006A800016E000ULL);
+        ASSERT_EQ(ids[2], 0x0100000000010000ULL);
+        ASSERT_EQ(ids[3], 0x0100000000020000ULL);
+    }
+}
+
+// 17-byte lines (no 0x) overflowed the old file_size/18 capacity guess; the
+// scanner count is exact, which the loader uses for allocation.
+TEST(whitelist_count_is_exact_for_short_lines) {
+    std::string text;
+    for (int i = 1; i <= 5000; i++) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%016x\n", 0x01000000 + i);
+        text += buf;
+    }
+    ASSERT_EQ(scan_chunks(text, 512).size(), 5000u);
 }
 
 // ============================================================================

@@ -10,6 +10,7 @@
  */
 
 #include "game_whitelist.hpp"
+#include "whitelist_parser.hpp"
 #include "../debug/log.hpp"
 
 #include <stratosphere.hpp>
@@ -22,48 +23,14 @@ namespace {
 
 constexpr const char* WHITELIST_PATH = "sdmc:/config/ryu_ldn_nx/gamelist.txt";
 
-// Average bytes per line in gamelist.txt (e.g., "0x0100152000022000\n" = ~19 bytes)
-constexpr size_t BYTES_PER_ENTRY = 18;
+// Hard cap on stored entries (8 bytes each) so a huge file cannot eat the shared heap
+constexpr size_t MAX_ENTRIES = 8192;
 
 // Dynamically allocated whitelist (sized based on file)
 static u64* g_whitelist = nullptr;
 static size_t g_whitelist_capacity = 0;
 static size_t g_whitelist_count = 0;
 static bool g_whitelist_loaded = false;
-
-/**
- * @brief Parse a hex string like "0x0100152000022000" to u64
- */
-u64 ParseHexId(const char* str, size_t len) {
-    if (!str || len == 0) return 0;
-
-    size_t i = 0;
-
-    // Skip "0x" or "0X" prefix if present
-    if (len >= 2 && str[0] == '0' && (str[1] == 'x' || str[1] == 'X')) {
-        i = 2;
-    }
-
-    u64 result = 0;
-    while (i < len) {
-        char c = str[i++];
-        u64 digit;
-
-        if (c >= '0' && c <= '9') {
-            digit = c - '0';
-        } else if (c >= 'a' && c <= 'f') {
-            digit = 10 + (c - 'a');
-        } else if (c >= 'A' && c <= 'F') {
-            digit = 10 + (c - 'A');
-        } else {
-            break;  // Invalid character, stop
-        }
-
-        result = (result << 4) | digit;
-    }
-
-    return result;
-}
 
 }  // namespace
 
@@ -97,65 +64,49 @@ void LoadWhitelist() {
 
     LOG_INFO("GameWhitelist: file_size=%lld bytes", file_size);
 
-    // Calculate capacity based on file size and allocate
-    g_whitelist_capacity = static_cast<size_t>(file_size / BYTES_PER_ENTRY) + 100;  // +100 margin
-    g_whitelist = new (std::nothrow) u64[g_whitelist_capacity];
-    if (!g_whitelist) {
-        ams::fs::CloseFile(file);
-        LOG_ERROR("GameWhitelist: failed to allocate %zu entries", g_whitelist_capacity);
-        g_whitelist_loaded = true;
-        return;
-    }
-    LOG_INFO("GameWhitelist: allocated %zu entries", g_whitelist_capacity);
-
-    // Read file in chunks and parse lines
+    // Pass 1 counts valid entries so the allocation is exact; pass 2 stores them.
     constexpr size_t CHUNK_SIZE = 512;
-    constexpr size_t LINE_BUF_SIZE = 24;
     char chunk[CHUNK_SIZE];
-    char line_buf[LINE_BUF_SIZE];
-    size_t line_len = 0;
-    s64 offset = 0;
 
-    while (offset < file_size && g_whitelist_count < g_whitelist_capacity) {
-        size_t to_read = static_cast<size_t>(
-            (file_size - offset) < static_cast<s64>(CHUNK_SIZE)
-            ? (file_size - offset)
-            : static_cast<s64>(CHUNK_SIZE)
-        );
+    for (int pass = 0; pass < 2; pass++) {
+        WhitelistScanner scanner;
+        size_t count = 0;
+        auto emit = [&](u64 id) {
+            if (pass == 1 && count < g_whitelist_capacity) g_whitelist[count] = id;
+            count++;
+        };
 
-        size_t bytes_read = 0;
-        rc = ams::fs::ReadFile(std::addressof(bytes_read), file, offset, chunk, to_read);
-        if (R_FAILED(rc)) {
-            LOG_WARN("GameWhitelist: ReadFile failed rc=0x%x", rc.GetValue());
-            break;
-        }
-
-        // Process chunk byte by byte
-        for (size_t i = 0; i < bytes_read && g_whitelist_count < g_whitelist_capacity; i++) {
-            char c = chunk[i];
-
-            if (c == '\n' || c == '\r') {
-                // End of line - parse and add to whitelist
-                if (line_len > 0) {
-                    u64 id = ParseHexId(line_buf, line_len);
-                    if (id != 0) {
-                        g_whitelist[g_whitelist_count++] = id;
-                    }
-                    line_len = 0;
-                }
-            } else if (line_len < LINE_BUF_SIZE - 1) {
-                line_buf[line_len++] = c;
+        for (s64 offset = 0; offset < file_size;) {
+            size_t to_read = static_cast<size_t>(
+                (file_size - offset) < static_cast<s64>(CHUNK_SIZE)
+                ? (file_size - offset) : static_cast<s64>(CHUNK_SIZE));
+            size_t bytes_read = 0;
+            rc = ams::fs::ReadFile(std::addressof(bytes_read), file, offset, chunk, to_read);
+            if (R_FAILED(rc) || bytes_read == 0) {
+                LOG_WARN("GameWhitelist: ReadFile failed rc=0x%x", rc.GetValue());
+                break;
             }
+            scanner.Feed(chunk, bytes_read, emit);
+            offset += bytes_read;
         }
+        scanner.Finish(emit);
 
-        offset += bytes_read;
-    }
-
-    // Check last line if no trailing newline
-    if (line_len > 0 && g_whitelist_count < g_whitelist_capacity) {
-        u64 id = ParseHexId(line_buf, line_len);
-        if (id != 0) {
-            g_whitelist[g_whitelist_count++] = id;
+        if (pass == 0) {
+            if (count > MAX_ENTRIES) {
+                LOG_WARN("GameWhitelist: %zu entries, keeping the first %zu", count, MAX_ENTRIES);
+                count = MAX_ENTRIES;
+            }
+            g_whitelist_capacity = count;
+            if (count == 0) break;
+            g_whitelist = new (std::nothrow) u64[count];
+            if (!g_whitelist) {
+                g_whitelist_capacity = 0;
+                LOG_ERROR("GameWhitelist: failed to allocate %zu entries", count);
+                break;
+            }
+            LOG_INFO("GameWhitelist: allocated %zu entries", count);
+        } else {
+            g_whitelist_count = count < g_whitelist_capacity ? count : g_whitelist_capacity;
         }
     }
 
