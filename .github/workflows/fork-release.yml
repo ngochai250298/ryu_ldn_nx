@@ -1,0 +1,40 @@
+# Fork: publish the SD-card zip for self-hosted relays (switch-ldn-relay's kit/ downloads it).
+# Push a tag like wss-v1 on fork/integration to run it.
+name: Fork release
+
+on:
+  push:
+    tags: ['wss-v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The image docker-compose.override.yml selects (Atmosphere-libs 1.12.1 prebuilt inside).
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ryu_ldn_nx:ams-1.12.1
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - run: docker compose run --rm build
+
+      - run: sha256sum ryu_ldn_nx-release.zip | tee ryu_ldn_nx-release.zip.sha256
+
+      - run: >
+          gh release create "$GITHUB_REF_NAME" ryu_ldn_nx-release.zip ryu_ldn_nx-release.zip.sha256
+          --prerelease --title "$GITHUB_REF_NAME"
+          --notes "ryu_ldn_nx with the wss transport, for a self-hosted switch-ldn relay. Atmosphère 1.12.1. Built from $GITHUB_SHA."
+        env:
+          GH_TOKEN: ${{ github.token }}
