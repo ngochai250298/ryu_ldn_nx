@@ -81,6 +81,8 @@
     AMS_SF_METHOD_INFO(C, H, 104, Result, SetWirelessControllerRestriction, (), ())                                     \
     AMS_SF_METHOD_INFO(C, H, 205, Result, Reject, (u32 nodeId), (nodeId))                                               \
     AMS_SF_METHOD_INFO(C, H, 208, Result, AddAcceptFilterEntry, (), ())                                                 \
-    AMS_SF_METHOD_INFO(C, H, 209, Result, ClearAcceptFilter, (), ())
+    AMS_SF_METHOD_INFO(C, H, 209, Result, ClearAcceptFilter, (), ())                                                 \
+    /* Newer firmware (switchbrew); Ryujinx implements only 106 */                                                     \
+    AMS_SF_METHOD_INFO(C, H, 106, Result, SetProtocol, (u32 protocol), (protocol), hos::Version_18_0_0)
 
 AMS_SF_DEFINE_INTERFACE(ams::mitm::ldn, ICommunicationInterface, AMS_RYU_LDN_ICOMMUNICATION, 0x85280DC3)

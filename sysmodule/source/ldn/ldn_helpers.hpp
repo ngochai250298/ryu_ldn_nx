@@ -19,6 +19,53 @@
 namespace ams::mitm::ldn::helpers {
 
 /**
+ * @brief nn::ldn result descriptions (module 203, shown as 2203-NNNN)
+ *
+ * Values from Ryujinx Services/Ldn/ResultCode.cs; InvalidState (32) is also
+ * what ldn_mitm returns for state errors.
+ */
+namespace desc {
+    constexpr uint32_t Module             = 203;
+    constexpr uint32_t DeviceNotAvailable = 16;
+    constexpr uint32_t DeviceDisabled     = 22;
+    constexpr uint32_t InvalidState       = 32;
+    constexpr uint32_t NodeNotFound       = 48;
+    constexpr uint32_t ConnectFailure     = 64;
+    constexpr uint32_t ConnectNotFound    = 65;
+    constexpr uint32_t ConnectTimeout     = 66;
+    constexpr uint32_t ConnectRejected    = 67;
+    constexpr uint32_t InvalidArgument    = 96;
+    constexpr uint32_t InvalidObject      = 97;
+    constexpr uint32_t VersionTooLow      = 113;
+    constexpr uint32_t VersionTooHigh     = 114;
+    constexpr uint32_t TooManyPlayers     = 144;
+}
+
+/**
+ * @brief Result description for a failed Connect/ConnectPrivate
+ *
+ * Ryujinx LdnMasterProxyClient.ConnectCommon + Station.NetworkErrorToResult.
+ * @p wire_error is the server's NetworkError as sent on the wire
+ * (LdnServer Network/Types/NetworkErrorMessage.cs: None=0, PortUnreachable,
+ * TooManyPlayers, VersionTooLow, VersionTooHigh, ConnectFailure,
+ * ConnectNotFound, ConnectTimeout, ConnectRejected, RejectFailed,
+ * BannedByServer=127, Unknown=-1). With no error the request timed out.
+ */
+constexpr uint32_t ConnectFailureDescription(int32_t wire_error) {
+    switch (wire_error) {
+        case 0: return desc::ConnectTimeout;   // no error reported: the wait timed out
+        case 2: return desc::TooManyPlayers;
+        case 3: return desc::VersionTooLow;
+        case 4: return desc::VersionTooHigh;
+        case 5: return desc::ConnectFailure;
+        case 6: return desc::ConnectNotFound;
+        case 7: return desc::ConnectTimeout;
+        case 8: return desc::ConnectRejected;
+        default: return desc::DeviceNotAvailable;
+    }
+}
+
+/**
  * @brief Disconnect reason to report when the server drops us from a room
  *
  * Ryujinx: the reason from a preceding Reject wins; otherwise

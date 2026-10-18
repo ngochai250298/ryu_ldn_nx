@@ -175,6 +175,36 @@ static void receive_stack_pool_gives_each_instance_its_own_stack() {
     ASSERT_TRUE(pool.Claim() == a);
 }
 
+// ============================================================================
+// Finding 5: LDN results (module 203) and Connect error mapping
+// ============================================================================
+
+static void ldn_result_descriptions_match_ryujinx() {
+    namespace d = ams::mitm::ldn::helpers::desc;
+    ASSERT_TRUE(d::Module == 203);
+    ASSERT_TRUE(d::DeviceNotAvailable == 16 && d::InvalidState == 32);
+    ASSERT_TRUE(d::ConnectFailure == 64 && d::ConnectTimeout == 66);
+    ASSERT_TRUE(d::InvalidArgument == 96 && d::TooManyPlayers == 144);
+}
+
+static void connect_failure_maps_server_network_error() {
+    using ams::mitm::ldn::helpers::ConnectFailureDescription;
+    namespace d = ams::mitm::ldn::helpers::desc;
+    // Wire values from LdnServer NetworkErrorMessage.cs.
+    ASSERT_TRUE(ConnectFailureDescription(0)   == d::ConnectTimeout);      // none: timed out
+    ASSERT_TRUE(ConnectFailureDescription(1)   == d::DeviceNotAvailable);  // PortUnreachable
+    ASSERT_TRUE(ConnectFailureDescription(2)   == d::TooManyPlayers);
+    ASSERT_TRUE(ConnectFailureDescription(3)   == d::VersionTooLow);
+    ASSERT_TRUE(ConnectFailureDescription(4)   == d::VersionTooHigh);
+    ASSERT_TRUE(ConnectFailureDescription(5)   == d::ConnectFailure);
+    ASSERT_TRUE(ConnectFailureDescription(6)   == d::ConnectNotFound);
+    ASSERT_TRUE(ConnectFailureDescription(7)   == d::ConnectTimeout);
+    ASSERT_TRUE(ConnectFailureDescription(8)   == d::ConnectRejected);
+    ASSERT_TRUE(ConnectFailureDescription(9)   == d::DeviceNotAvailable);  // RejectFailed
+    ASSERT_TRUE(ConnectFailureDescription(127) == d::DeviceNotAvailable);  // BannedByServer
+    ASSERT_TRUE(ConnectFailureDescription(-1)  == d::DeviceNotAvailable);  // Unknown
+}
+
 int main() {
     printf("\n========================================\n");
     printf("  LDN Service Tests - ryu_ldn_nx\n");
@@ -185,6 +215,8 @@ int main() {
     RUN(timeout_not_expired_or_disabled_does_not_fire);
     RUN(server_disconnect_reason_matches_ryujinx);
     RUN(receive_stack_pool_gives_each_instance_its_own_stack);
+    RUN(ldn_result_descriptions_match_ryujinx);
+    RUN(connect_failure_maps_server_network_error);
 
     printf("\n========================================\n");
     printf("  Results: %d/%d passed\n", g_tests_passed, g_tests_passed + g_tests_failed);

@@ -369,6 +369,15 @@ public:
     /// @gdb{tag="LDN:OPS", msg="ClearAcceptFilter"}
     Result ClearAcceptFilter();
 
+    /**
+     * @brief SetProtocol (cmd 106, [18.0.0+])
+     *
+     * Ryujinx stubs it: accepts 1 or 3 (the only values hardware allows)
+     * and returns Success. Other values get InvalidArgument here, where
+     * Ryujinx throws.
+     */
+    Result SetProtocol(u32 protocol);
+
 private:
     /**
      * @brief Connect to RyuLdn server
@@ -497,7 +506,6 @@ private:
 
 private:
     LdnStateMachine m_state_machine;        ///< Thread-safe state machine
-    u64 m_error_state;                      ///< Error state flag
     u64 m_client_process_id;                ///< Client game process ID
     const u64 m_owner_pid;                  ///< Process that opened ldn:u; only this LdnPid is ours to clear
     const int m_stack_slot;                 ///< Receive-thread stack slot, released in the destructor
