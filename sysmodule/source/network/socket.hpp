@@ -228,15 +228,21 @@ bool socket_is_initialized();
 // ============================================================================
 
 /**
- * @brief Convert errno to SocketResult (for testing)
+ * @brief Convert errno to SocketResult
  *
  * Maps POSIX errno codes to SocketResult values.
  * @param err errno value
  * @return Corresponding SocketResult
  */
-#ifdef TEST_BUILD
 SocketResult errno_to_result(int err);
-#endif
+
+/**
+ * @brief Convert errno from send/recv on an established connection
+ *
+ * EPIPE, ECONNRESET, ECONNABORTED, ETIMEDOUT, ENETDOWN, ENETRESET and
+ * ENOTCONN become ConnectionReset; anything else as errno_to_result().
+ */
+SocketResult established_errno_to_result(int err);
 
 /**
  * @brief Convert SocketResult to string for debugging

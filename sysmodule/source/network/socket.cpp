@@ -155,8 +155,6 @@ bool socket_is_initialized() {
 // Helper Functions (Internal)
 // =============================================================================
 
-namespace {
-
 /**
  * @brief Map POSIX errno to SocketResult
  *
@@ -173,7 +171,6 @@ namespace {
  * - EHOSTUNREACH -> HostUnreachable (routing failure)
  * - ETIMEDOUT -> Timeout (connection or operation timeout)
  */
-#ifndef TEST_BUILD
 SocketResult errno_to_result(int err) {
     // Non-blocking operation would block
     if (err == EAGAIN) return SocketResult::WouldBlock;
@@ -194,7 +191,24 @@ SocketResult errno_to_result(int err) {
     // Everything else is a generic socket error
     return SocketResult::SocketError;
 }
-#endif
+
+/**
+ * @brief Map errno from send/recv on an established connection
+ *
+ * On a connected socket these all mean the connection is gone, so they
+ * map to ConnectionReset (reported upward as ConnectionLost) instead of
+ * the transient-looking Timeout/NetworkDown/NotConnected/SocketError.
+ * EPIPE is what the Horizon stack returns after a RST.
+ */
+SocketResult established_errno_to_result(int err) {
+    if (err == EPIPE || err == ECONNRESET || err == ECONNABORTED ||
+        err == ETIMEDOUT || err == ENETDOWN || err == ENETRESET || err == ENOTCONN) {
+        return SocketResult::ConnectionReset;
+    }
+    return errno_to_result(err);
+}
+
+namespace {
 
 /**
  * @brief Resolve hostname to IPv4 address
@@ -522,7 +536,7 @@ SocketResult Socket::send(const uint8_t* data, size_t size, size_t& sent) {
         }
         // Connection error - mark as disconnected
         m_connected = false;
-        return errno_to_result(errno);
+        return established_errno_to_result(errno);
     }
 
     if (ret == 0) {
@@ -634,7 +648,7 @@ SocketResult Socket::recv(uint8_t* buffer, size_t buffer_size, size_t& received,
                 return SocketResult::WouldBlock;
             }
             m_connected = false;
-            return errno_to_result(errno);
+            return established_errno_to_result(errno);
         }
 
         if (ret == 0) {
@@ -655,7 +669,7 @@ SocketResult Socket::recv(uint8_t* buffer, size_t buffer_size, size_t& received,
             return SocketResult::WouldBlock;
         }
         m_connected = false;
-        return errno_to_result(errno);
+        return established_errno_to_result(errno);
     }
 
     if (ret == 0) {
@@ -884,27 +898,3 @@ SocketResult Socket::wait_ready(uint32_t timeout_ms, bool for_write) {
 }
 
 } // namespace ryu_ldn::network
-
-#ifdef TEST_BUILD
-// Expose errno_to_result for unit testing
-namespace ryu_ldn::network {
-
-SocketResult errno_to_result(int err) {
-    // Delegate to the anonymous namespace version by reimplementing
-    // (the anonymous version is not accessible here)
-    if (err == EAGAIN) return SocketResult::WouldBlock;
-#if EAGAIN != EWOULDBLOCK
-    if (err == EWOULDBLOCK) return SocketResult::WouldBlock;
-#endif
-    if (err == ECONNREFUSED) return SocketResult::ConnectionRefused;
-    if (err == ECONNRESET) return SocketResult::ConnectionReset;
-    if (err == EHOSTUNREACH || err == ENETUNREACH) return SocketResult::HostUnreachable;
-    if (err == ENETDOWN) return SocketResult::NetworkDown;
-    if (err == ENOTCONN) return SocketResult::NotConnected;
-    if (err == EISCONN) return SocketResult::AlreadyConnected;
-    if (err == ETIMEDOUT) return SocketResult::Timeout;
-    return SocketResult::SocketError;
-}
-
-} // namespace ryu_ldn::network
-#endif

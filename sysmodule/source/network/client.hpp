@@ -615,6 +615,16 @@ private:
                                         ConnectionEvent event);
 
     /**
+     * @brief Leave a connected state after a failure
+     *
+     * Applies the event, closes the transport and starts the backoff
+     * timer when the state machine moved to Backoff.
+     *
+     * @param event ConnectionLost, HandshakeFailed or FatalError
+     */
+    void handle_connection_lost(ConnectionEvent event);
+
+    /**
      * @brief Attempt TCP connection
      */
     /// @gdb{tag="NETWORK:STATE_CALLBACKS", msg="try_connect: attempting TCP"}

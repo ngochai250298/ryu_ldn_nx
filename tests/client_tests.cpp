@@ -1236,7 +1236,40 @@ bool test_send_scan_connection_lost_callback() {
     ClientOpResult result = client->send_scan(filter);
 
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    ASSERT_TRUE(g_state_changes.size() >= 1);
+    return true;
+}
+
+/**
+ * @brief A transport that drops with a non-ConnectionLost result still reconnects
+ *
+ * Finding 3: before the fix, a send failing with EPIPE (SocketError) left
+ * the socket disconnected while the state machine stayed Ready forever.
+ */
+bool test_transport_drop_with_generic_error_leaves_ready() {
+    MockTcpClient* mock;
+    auto client = make_client(mock);
+    clear_state_changes();
+    client->set_state_callback(state_callback);
+    drive_to_ready(client.get(), mock, 1000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
+    uint32_t disconnects_before = mock->disconnect_call_count;
+
+    // Transport went dead but reported a generic error, not ConnectionLost
+    mock->next_send_result = ClientResult::InternalError;
+    mock->connected = false;
+    ScanFilterFull filter{};
+    ASSERT_EQ(client->send_scan(filter), ClientOpResult::SendFailed);
+
+    mock->next_recv_result = ClientResult::Timeout;
+    client->update(2000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    // The dead transport was closed so the retry starts from a fresh fd
+    ASSERT_EQ(mock->disconnect_call_count, disconnects_before + 1);
     ASSERT_TRUE(g_state_changes.size() >= 1);
     return true;
 }
@@ -1700,6 +1733,9 @@ bool test_send_create_access_point_connection_lost() {
     CreateAccessPointRequest req{};
     ClientOpResult result = client->send_create_access_point(req);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     ASSERT_TRUE(g_state_changes.size() >= 1);
     return true;
@@ -1717,6 +1753,9 @@ bool test_send_connect_request_connection_lost() {
     ConnectRequest req{};
     ClientOpResult result = client->send_connect(req);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     ASSERT_TRUE(g_state_changes.size() >= 1);
     return true;
@@ -1734,6 +1773,9 @@ bool test_send_create_access_point_private_connection_lost() {
     CreateAccessPointPrivateRequest req{};
     ClientOpResult result = client->send_create_access_point_private(req);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1750,6 +1792,9 @@ bool test_send_connect_private_connection_lost() {
     ConnectPrivateRequest req{};
     ClientOpResult result = client->send_connect_private(req);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1767,6 +1812,9 @@ bool test_send_proxy_data_connection_lost() {
     uint8_t data[] = {0x01, 0x02};
     ClientOpResult result = client->send_proxy_data(hdr, data, sizeof(data));
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1782,6 +1830,9 @@ bool test_send_ping_response_connection_lost() {
     mock->next_send_result = ClientResult::ConnectionLost;
     ClientOpResult result = client->send_ping_response(1);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1797,6 +1848,9 @@ bool test_send_disconnect_network_connection_lost() {
     mock->next_send_result = ClientResult::ConnectionLost;
     ClientOpResult result = client->send_disconnect_network();
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1812,6 +1866,9 @@ bool test_send_set_accept_policy_connection_lost() {
     mock->next_send_result = ClientResult::ConnectionLost;
     ClientOpResult result = client->send_set_accept_policy(AcceptPolicy::AcceptAll);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1828,6 +1885,9 @@ bool test_send_set_advertise_data_connection_lost() {
     uint8_t data[] = {0x01, 0x02};
     ClientOpResult result = client->send_set_advertise_data(data, sizeof(data));
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1843,6 +1903,9 @@ bool test_send_reject_connection_lost() {
     mock->next_send_result = ClientResult::ConnectionLost;
     ClientOpResult result = client->send_reject(1, DisconnectReason::Rejected);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1859,6 +1922,9 @@ bool test_send_raw_packet_connection_lost() {
     uint8_t data[] = {0x01, 0x02, 0x03};
     ClientOpResult result = client->send_raw_packet(data, sizeof(data));
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -2407,6 +2473,7 @@ int main() {
     RUN_TEST(test_update_disconnecting);
     RUN_TEST(test_update_error_state_noop);
     RUN_TEST(test_send_scan_connection_lost_callback);
+    RUN_TEST(test_transport_drop_with_generic_error_leaves_ready);
 
     printf("\nconnect() edge cases:\n");
     RUN_TEST(test_connect_no_args);
