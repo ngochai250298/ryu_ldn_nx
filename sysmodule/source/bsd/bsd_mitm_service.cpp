@@ -741,7 +741,9 @@ Result BsdMitmService::Bind(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
     auto& manager = ProxySocketManager::GetInstance();
     const bool is_inaddr_any = (sock_addr.sin_addr == 0);
     SocketInfo socket_info;
-    if (!rb::IsProxyBind(sock_addr.GetAddr(), manager.GetLocalIp() != 0) || !GetSocketInfo(Key(fd), &socket_info)) {
+    if (!rb::IsProxyBind(sock_addr.GetAddr(), manager.GetLocalIp() != 0) || !GetSocketInfo(Key(fd), &socket_info) ||
+        socket_info.type != rb::SocketType::Dgram) {
+        // Only UDP is proxied: TCP over the proxy isn't wired to the server.
         R_RETURN(ForwardToRealService());
     }
 
@@ -788,6 +790,14 @@ Result BsdMitmService::Connect(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32
     }
 
     LOG_INFO("[BSD#%u] Connect fd=%d to LDN port %u", m_session_id, fd, sock_addr.GetPort());
+
+    if (socket_info.type != rb::SocketType::Dgram) {
+        // TCP over the proxy isn't wired to the server (ProxyConnect is never
+        // sent), and a real connect to 10.114.x.x would block until the stack
+        // gives up. Fail at once instead.
+        LOG_WARN("[BSD#%u] Connect fd=%d: TCP over LDN is not supported", m_session_id, fd);
+        R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NetUnreach)));
+    }
 
     auto& manager = ProxySocketManager::GetInstance();
     auto proxy = manager.GetProxySocket(Key(fd));
@@ -898,7 +908,7 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
     auto& manager = ProxySocketManager::GetInstance();
 
     // First send to an LDN address from an unbound socket: auto-bind a proxy.
-    if (has_dest && dest.IsLdnAddress() && found && !socket_info.is_proxy) {
+    if (has_dest && dest.IsLdnAddress() && found && !socket_info.is_proxy && socket_info.type == rb::SocketType::Dgram) {
         std::shared_ptr<ProxySocket> created;
         const s32 bind_result = CreateBoundProxy(manager, Key(fd), socket_info, SessionAddr(manager), &created);
         if (bind_result < 0) {
