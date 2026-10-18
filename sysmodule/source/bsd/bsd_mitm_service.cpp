@@ -319,8 +319,10 @@ bool BsdMitmService::ShouldMitm(const sm::MitmProcessInfo& client_info) {
 
     u64 program_id = client_info.program_id.value;
 
-    // Skip non-applications (system services, applets, etc.)
-    if (program_id < 0x0100000000000000ULL) {
+    // Skip non-applications (system services, applets, etc.).
+    // System modules live at 0x0100000000000000-0x01000000000007FF and applets
+    // at 0x0100000000001000+, all below ncm::ApplicationId::Start.
+    if (!ncm::IsApplicationId(client_info.program_id)) {
         LOG_INFO("BSD ShouldMitm #%u: SKIP (system 0x%016lx)", call_id, program_id);
         return false;
     }
