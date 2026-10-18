@@ -550,6 +550,17 @@ bool IsProxyFd(u64 key) {
     return it != g_socket_info.end() && it->second.is_proxy;
 }
 
+/// The fd's proxy socket. Sets *gone when the fd was a proxy whose LDN
+/// session has ended (Reset dropped it): it must not fall through to the
+/// real socket, which was never bound to 10.114.x.x and would block forever.
+std::shared_ptr<ProxySocket> LookupProxy(u64 key, bool* gone) {
+    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(key);
+    *gone = (proxy == nullptr) && IsProxyFd(key);
+    return proxy;
+}
+
+constexpr s32 NetDown = -static_cast<s32>(ryu_ldn::bsd::BsdErrno::NetDown);
+
 void MarkProxy(u64 key) {
     std::scoped_lock lock(g_socket_info_mutex);
     auto it = g_socket_info.find(key);
@@ -850,7 +861,11 @@ Result BsdMitmService::GetSockName(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
 Result BsdMitmService::Send(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 flags, const sf::InAutoSelectBuffer& buffer) {
     m_command_count++;
 
-    auto proxy = IsProxyFd(Key(fd)) ? ProxySocketManager::GetInstance().GetProxySocket(Key(fd)) : nullptr;
+    bool gone;
+    auto proxy = LookupProxy(Key(fd), &gone);
+    if (gone) {
+        R_RETURN(Reply(out_ret, out_errno, NetDown));
+    }
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -860,7 +875,11 @@ Result BsdMitmService::Send(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
 Result BsdMitmService::Write(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, const sf::InAutoSelectBuffer& buffer) {
     m_command_count++;
 
-    auto proxy = IsProxyFd(Key(fd)) ? ProxySocketManager::GetInstance().GetProxySocket(Key(fd)) : nullptr;
+    bool gone;
+    auto proxy = LookupProxy(Key(fd), &gone);
+    if (gone) {
+        R_RETURN(Reply(out_ret, out_errno, NetDown));
+    }
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -896,8 +915,8 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
 
     auto proxy = manager.GetProxySocket(Key(fd));
     if (proxy == nullptr) {
-        // The real socket can't reach LDN addresses.
-        R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NetUnreach)));
+        // The LDN session ended (Reset); the real socket can't reach LDN addresses.
+        R_RETURN(Reply(out_ret, out_errno, NetDown));
     }
     if (!has_dest) {
         // sendto() without an address on a connected socket is send().
@@ -909,7 +928,11 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
 Result BsdMitmService::Recv(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 flags, sf::OutAutoSelectBuffer buffer) {
     m_command_count++;
 
-    auto proxy = IsProxyFd(Key(fd)) ? ProxySocketManager::GetInstance().GetProxySocket(Key(fd)) : nullptr;
+    bool gone;
+    auto proxy = LookupProxy(Key(fd), &gone);
+    if (gone) {
+        R_RETURN(Reply(out_ret, out_errno, NetDown));
+    }
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -919,7 +942,11 @@ Result BsdMitmService::Recv(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
 Result BsdMitmService::Read(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, sf::OutAutoSelectBuffer buffer) {
     m_command_count++;
 
-    auto proxy = IsProxyFd(Key(fd)) ? ProxySocketManager::GetInstance().GetProxySocket(Key(fd)) : nullptr;
+    bool gone;
+    auto proxy = LookupProxy(Key(fd), &gone);
+    if (gone) {
+        R_RETURN(Reply(out_ret, out_errno, NetDown));
+    }
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -930,7 +957,11 @@ Result BsdMitmService::RecvFrom(sf::Out<s32> out_ret, sf::Out<s32> out_errno, sf
                                 s32 fd, s32 flags, sf::OutAutoSelectBuffer buffer, sf::OutAutoSelectBuffer addr_out) {
     m_command_count++;
 
-    auto proxy = IsProxyFd(Key(fd)) ? ProxySocketManager::GetInstance().GetProxySocket(Key(fd)) : nullptr;
+    bool gone;
+    auto proxy = LookupProxy(Key(fd), &gone);
+    if (gone) {
+        R_RETURN(Reply(out_ret, out_errno, NetDown));
+    }
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -965,7 +996,6 @@ s32 SelectProxies(u32 session_id, s32 nfds,
                   const sf::InAutoSelectBuffer& rd_in, const sf::InAutoSelectBuffer& wr_in, const sf::InAutoSelectBuffer& er_in,
                   sf::OutAutoSelectBuffer& rd_out, sf::OutAutoSelectBuffer& wr_out, sf::OutAutoSelectBuffer& er_out,
                   bool* has_proxy, bool* has_real) {
-    auto& manager = ProxySocketManager::GetInstance();
     s32 ready = 0;
     for (s32 fd = 0; fd < nfds; fd++) {
         const bool r = FdIsSet(fd, rd_in.GetPointer(), rd_in.GetSize());
@@ -974,7 +1004,16 @@ s32 SelectProxies(u32 session_id, s32 nfds,
         if (!r && !w && !e) {
             continue;
         }
-        auto proxy = manager.GetProxySocket(rb::SocketKey(session_id, fd));
+        bool gone;
+        auto proxy = LookupProxy(rb::SocketKey(session_id, fd), &gone);
+        if (gone) {
+            // Session ended: report readable + error so the game's next call
+            // gets ENETDOWN instead of waiting.
+            *has_proxy = true;
+            if (r) { FdSet(fd, rd_out.GetPointer(), rd_out.GetSize()); ready++; }
+            if (e) { FdSet(fd, er_out.GetPointer(), er_out.GetSize()); ready++; }
+            continue;
+        }
         if (proxy == nullptr) {
             *has_real = true;
             continue;
@@ -998,10 +1037,16 @@ s32 SelectProxies(u32 session_id, s32 nfds,
 
 /// Proxy readiness for poll(); sets revents and returns the number of ready entries.
 s32 PollProxies(u32 session_id, rb::PollFd* fds, size_t count, bool* has_proxy, bool* has_real) {
-    auto& manager = ProxySocketManager::GetInstance();
     s32 ready = 0;
     for (size_t i = 0; i < count; i++) {
-        auto proxy = manager.GetProxySocket(rb::SocketKey(session_id, fds[i].fd));
+        bool gone;
+        auto proxy = LookupProxy(rb::SocketKey(session_id, fds[i].fd), &gone);
+        if (gone) {
+            *has_proxy = true;
+            fds[i].revents = static_cast<s16>(rb::PollEvents::Err) | static_cast<s16>(rb::PollEvents::Hup);
+            ready++;
+            continue;
+        }
         if (proxy == nullptr) {
             *has_real = true;
             continue;
