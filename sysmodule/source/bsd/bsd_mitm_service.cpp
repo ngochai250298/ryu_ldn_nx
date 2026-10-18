@@ -97,7 +97,7 @@ struct SocketInfo {
  * fd collisions are handled by the fact that each BsdMitmService instance
  * forwards to a different real service session.
  */
-static std::unordered_map<s32, SocketInfo> g_socket_info;
+static std::unordered_map<u64, SocketInfo> g_socket_info;
 
 /**
  * @brief Mutex protecting g_socket_info
@@ -192,7 +192,7 @@ BsdMitmService::~BsdMitmService() {
     // IMPORTANT: We must NOT hold g_socket_info_mutex while calling CloseProxySocket
     // because CloseProxySocket acquires ProxySocketManager::m_mutex, which could
     // cause a deadlock if the mutex order is reversed elsewhere.
-    std::vector<s32> proxy_fds_to_close;
+    std::vector<u64> proxy_keys_to_close;
     {
         std::scoped_lock lock(g_socket_info_mutex);
         size_t cleaned = 0;
@@ -200,7 +200,7 @@ BsdMitmService::~BsdMitmService() {
             if (it->second.session_id == m_session_id) {
                 // Collect proxy sockets to close after releasing the lock
                 if (it->second.is_proxy) {
-                    proxy_fds_to_close.push_back(it->first);
+                    proxy_keys_to_close.push_back(it->first);
                 }
                 it = g_socket_info.erase(it);
                 cleaned++;
@@ -214,10 +214,10 @@ BsdMitmService::~BsdMitmService() {
     }
 
     // Now close proxy sockets without holding g_socket_info_mutex
-    if (!proxy_fds_to_close.empty()) {
+    if (!proxy_keys_to_close.empty()) {
         auto& manager = ProxySocketManager::GetInstance();
-        for (s32 fd : proxy_fds_to_close) {
-            manager.CloseProxySocket(fd);
+        for (u64 key : proxy_keys_to_close) {
+            manager.CloseProxySocket(key);
         }
     }
 
@@ -544,15 +544,15 @@ u32 WriteSockAddrIn(sf::OutAutoSelectBuffer& buf, const rb::SockAddrIn& addr) {
     return sizeof(addr);
 }
 
-bool IsProxyFd(s32 fd) {
+bool IsProxyFd(u64 key) {
     std::scoped_lock lock(g_socket_info_mutex);
-    auto it = g_socket_info.find(fd);
+    auto it = g_socket_info.find(key);
     return it != g_socket_info.end() && it->second.is_proxy;
 }
 
-void MarkProxy(s32 fd) {
+void MarkProxy(u64 key) {
     std::scoped_lock lock(g_socket_info_mutex);
-    auto it = g_socket_info.find(fd);
+    auto it = g_socket_info.find(key);
     if (it != g_socket_info.end()) {
         it->second.is_proxy = true;
     }
@@ -560,17 +560,17 @@ void MarkProxy(s32 fd) {
 
 /// Applies a change to the tracked info of fd, if it is tracked.
 template<typename F>
-void UpdateSocketInfo(s32 fd, F update) {
+void UpdateSocketInfo(u64 key, F update) {
     std::scoped_lock lock(g_socket_info_mutex);
-    auto it = g_socket_info.find(fd);
+    auto it = g_socket_info.find(key);
     if (it != g_socket_info.end()) {
         update(it->second);
     }
 }
 
-bool GetSocketInfo(s32 fd, SocketInfo* out) {
+bool GetSocketInfo(u64 key, SocketInfo* out) {
     std::scoped_lock lock(g_socket_info_mutex);
-    auto it = g_socket_info.find(fd);
+    auto it = g_socket_info.find(key);
     if (it == g_socket_info.end()) {
         return false;
     }
@@ -580,8 +580,8 @@ bool GetSocketInfo(s32 fd, SocketInfo* out) {
 
 /// Creates the proxy for fd and carries over the options the game set on the
 /// socket before it became a proxy (fcntl/ioctl/setsockopt arrive first).
-std::shared_ptr<ProxySocket> CreateProxy(ProxySocketManager& manager, s32 fd, const SocketInfo& info) {
-    auto proxy = manager.CreateProxySocket(fd, info.type, info.protocol);
+std::shared_ptr<ProxySocket> CreateProxy(ProxySocketManager& manager, u64 key, const SocketInfo& info) {
+    auto proxy = manager.CreateProxySocket(key, info.type, info.protocol);
     if (proxy != nullptr) {
         proxy->SetBroadcastEnabled(info.broadcast);
         proxy->SetNonBlocking(info.non_blocking);
@@ -618,7 +618,7 @@ Result ForwardSocketCreate(::Service* srv, u32 cmd_id, u32 session_id,
     if (out.ret >= 0) {
         std::scoped_lock lock(g_socket_info_mutex);
         const s32 base_type = type & rb::SOCK_TYPE_MASK;
-        g_socket_info[out.ret] = SocketInfo{
+        g_socket_info[rb::SocketKey(session_id, out.ret)] = SocketInfo{
             .type = static_cast<rb::SocketType>(base_type),
             .protocol = DefaultProtocol(base_type, protocol),
             .is_proxy = false,
@@ -654,13 +654,13 @@ Result BsdMitmService::Close(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 f
     bool was_proxy = false;
     {
         std::scoped_lock lock(g_socket_info_mutex);
-        auto it = g_socket_info.find(fd);
+        auto it = g_socket_info.find(Key(fd));
         if (it != g_socket_info.end()) {
             was_proxy = it->second.is_proxy;
             g_socket_info.erase(it);
         }
     }
-    if (was_proxy && ProxySocketManager::GetInstance().CloseProxySocket(fd)) {
+    if (was_proxy && ProxySocketManager::GetInstance().CloseProxySocket(Key(fd))) {
         LOG_INFO("[BSD#%u] Close fd=%d closed LDN proxy socket", m_session_id, fd);
     }
 
@@ -688,11 +688,11 @@ Result BsdMitmService::Bind(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
     auto& manager = ProxySocketManager::GetInstance();
     const bool is_inaddr_any = (sock_addr.sin_addr == 0);
     SocketInfo socket_info;
-    if (!rb::IsProxyBind(sock_addr.GetAddr(), manager.GetLocalIp() != 0) || !GetSocketInfo(fd, &socket_info)) {
+    if (!rb::IsProxyBind(sock_addr.GetAddr(), manager.GetLocalIp() != 0) || !GetSocketInfo(Key(fd), &socket_info)) {
         R_RETURN(ForwardToRealService());
     }
 
-    auto proxy = CreateProxy(manager, fd, socket_info);
+    auto proxy = CreateProxy(manager, Key(fd), socket_info);
     if (proxy == nullptr) {
         LOG_ERROR("[BSD#%u] Bind fd=%d failed to create proxy socket", m_session_id, fd);
         R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NoMem)));
@@ -719,7 +719,7 @@ Result BsdMitmService::Bind(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
         R_RETURN(Reply(out_ret, out_errno, bind_result));
     }
 
-    MarkProxy(fd);
+    MarkProxy(Key(fd));
     LOG_INFO("[BSD#%u] Bind fd=%d bound to LDN proxy port %u", m_session_id, fd, bind_addr.GetPort());
     manager.DeliverPendingPackets(proxy.get(), bind_addr.GetPort(), socket_info.protocol);
 
@@ -745,16 +745,16 @@ Result BsdMitmService::Connect(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32
 
     rb::SockAddrIn sock_addr;
     SocketInfo socket_info;
-    if (!ReadSockAddrIn(addr, &sock_addr) || !sock_addr.IsLdnAddress() || !GetSocketInfo(fd, &socket_info)) {
+    if (!ReadSockAddrIn(addr, &sock_addr) || !sock_addr.IsLdnAddress() || !GetSocketInfo(Key(fd), &socket_info)) {
         R_RETURN(ForwardToRealService());
     }
 
     LOG_INFO("[BSD#%u] Connect fd=%d to LDN port %u", m_session_id, fd, sock_addr.GetPort());
 
     auto& manager = ProxySocketManager::GetInstance();
-    auto proxy = manager.GetProxySocket(fd);
+    auto proxy = manager.GetProxySocket(Key(fd));
     if (proxy == nullptr) {
-        proxy = CreateProxy(manager, fd, socket_info);
+        proxy = CreateProxy(manager, Key(fd), socket_info);
         if (proxy == nullptr) {
             R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NoMem)));
         }
@@ -783,7 +783,7 @@ Result BsdMitmService::Connect(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32
         R_RETURN(Reply(out_ret, out_errno, connect_result));
     }
 
-    MarkProxy(fd);
+    MarkProxy(Key(fd));
     R_RETURN(Reply(out_ret, out_errno, 0));
 }
 
@@ -802,7 +802,7 @@ Result BsdMitmService::Listen(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
 Result BsdMitmService::GetPeerName(sf::Out<s32> out_ret, sf::Out<s32> out_errno, sf::Out<u32> out_addrlen, s32 fd, sf::OutAutoSelectBuffer addr_out) {
     m_command_count++;
 
-    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(fd);
+    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(Key(fd));
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -816,7 +816,7 @@ Result BsdMitmService::GetPeerName(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
 Result BsdMitmService::GetSockName(sf::Out<s32> out_ret, sf::Out<s32> out_errno, sf::Out<u32> out_addrlen, s32 fd, sf::OutAutoSelectBuffer addr_out) {
     m_command_count++;
 
-    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(fd);
+    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(Key(fd));
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -834,7 +834,7 @@ Result BsdMitmService::GetSockName(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
 Result BsdMitmService::Send(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 flags, const sf::InAutoSelectBuffer& buffer) {
     m_command_count++;
 
-    auto proxy = IsProxyFd(fd) ? ProxySocketManager::GetInstance().GetProxySocket(fd) : nullptr;
+    auto proxy = IsProxyFd(Key(fd)) ? ProxySocketManager::GetInstance().GetProxySocket(Key(fd)) : nullptr;
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -844,7 +844,7 @@ Result BsdMitmService::Send(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
 Result BsdMitmService::Write(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, const sf::InAutoSelectBuffer& buffer) {
     m_command_count++;
 
-    auto proxy = IsProxyFd(fd) ? ProxySocketManager::GetInstance().GetProxySocket(fd) : nullptr;
+    auto proxy = IsProxyFd(Key(fd)) ? ProxySocketManager::GetInstance().GetProxySocket(Key(fd)) : nullptr;
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -858,15 +858,15 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
     rb::SockAddrIn dest;
     const bool has_dest = ReadSockAddrIn(addr, &dest);
     SocketInfo socket_info;
-    const bool found = GetSocketInfo(fd, &socket_info);
+    const bool found = GetSocketInfo(Key(fd), &socket_info);
     bool is_proxy = found && socket_info.is_proxy;
     auto& manager = ProxySocketManager::GetInstance();
 
     // First send to an LDN address from an unbound socket: auto-bind a proxy.
     if (has_dest && dest.IsLdnAddress() && found && !socket_info.is_proxy) {
         is_proxy = true;
-        if (manager.GetProxySocket(fd) == nullptr) {
-            auto proxy = CreateProxy(manager, fd, socket_info);
+        if (manager.GetProxySocket(Key(fd)) == nullptr) {
+            auto proxy = CreateProxy(manager, Key(fd), socket_info);
             if (proxy == nullptr) {
                 R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NoMem)));
             }
@@ -885,7 +885,7 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
                 R_RETURN(Reply(out_ret, out_errno, bind_result));
             }
         }
-        MarkProxy(fd);
+        MarkProxy(Key(fd));
     }
 
     // Internet destinations use the real socket even on a proxied fd (an
@@ -894,7 +894,7 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
         R_RETURN(ForwardToRealService());
     }
 
-    auto proxy = manager.GetProxySocket(fd);
+    auto proxy = manager.GetProxySocket(Key(fd));
     if (proxy == nullptr || !has_dest) {
         // The real socket can't reach LDN addresses.
         R_RETURN(Reply(out_ret, out_errno, -static_cast<s32>(rb::BsdErrno::NetUnreach)));
@@ -905,7 +905,7 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
 Result BsdMitmService::Recv(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 flags, sf::OutAutoSelectBuffer buffer) {
     m_command_count++;
 
-    auto proxy = IsProxyFd(fd) ? ProxySocketManager::GetInstance().GetProxySocket(fd) : nullptr;
+    auto proxy = IsProxyFd(Key(fd)) ? ProxySocketManager::GetInstance().GetProxySocket(Key(fd)) : nullptr;
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -915,7 +915,7 @@ Result BsdMitmService::Recv(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
 Result BsdMitmService::Read(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, sf::OutAutoSelectBuffer buffer) {
     m_command_count++;
 
-    auto proxy = IsProxyFd(fd) ? ProxySocketManager::GetInstance().GetProxySocket(fd) : nullptr;
+    auto proxy = IsProxyFd(Key(fd)) ? ProxySocketManager::GetInstance().GetProxySocket(Key(fd)) : nullptr;
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -926,7 +926,7 @@ Result BsdMitmService::RecvFrom(sf::Out<s32> out_ret, sf::Out<s32> out_errno, sf
                                 s32 fd, s32 flags, sf::OutAutoSelectBuffer buffer, sf::OutAutoSelectBuffer addr_out) {
     m_command_count++;
 
-    auto proxy = IsProxyFd(fd) ? ProxySocketManager::GetInstance().GetProxySocket(fd) : nullptr;
+    auto proxy = IsProxyFd(Key(fd)) ? ProxySocketManager::GetInstance().GetProxySocket(Key(fd)) : nullptr;
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -957,7 +957,7 @@ void FdSet(s32 fd, void* fds, size_t size) {
 }
 
 /// Proxy readiness for select(); returns the number of bits set.
-s32 SelectProxies(s32 nfds,
+s32 SelectProxies(u32 session_id, s32 nfds,
                   const sf::InAutoSelectBuffer& rd_in, const sf::InAutoSelectBuffer& wr_in, const sf::InAutoSelectBuffer& er_in,
                   sf::OutAutoSelectBuffer& rd_out, sf::OutAutoSelectBuffer& wr_out, sf::OutAutoSelectBuffer& er_out,
                   bool* has_proxy, bool* has_real) {
@@ -970,7 +970,7 @@ s32 SelectProxies(s32 nfds,
         if (!r && !w && !e) {
             continue;
         }
-        auto proxy = manager.GetProxySocket(fd);
+        auto proxy = manager.GetProxySocket(rb::SocketKey(session_id, fd));
         if (proxy == nullptr) {
             *has_real = true;
             continue;
@@ -993,11 +993,11 @@ s32 SelectProxies(s32 nfds,
 }
 
 /// Proxy readiness for poll(); sets revents and returns the number of ready entries.
-s32 PollProxies(rb::PollFd* fds, size_t count, bool* has_proxy, bool* has_real) {
+s32 PollProxies(u32 session_id, rb::PollFd* fds, size_t count, bool* has_proxy, bool* has_real) {
     auto& manager = ProxySocketManager::GetInstance();
     s32 ready = 0;
     for (size_t i = 0; i < count; i++) {
-        auto proxy = manager.GetProxySocket(fds[i].fd);
+        auto proxy = manager.GetProxySocket(rb::SocketKey(session_id, fds[i].fd));
         if (proxy == nullptr) {
             *has_real = true;
             continue;
@@ -1041,7 +1041,7 @@ Result BsdMitmService::Select(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
 
     bool has_proxy = false;
     bool has_real = false;
-    const s32 ready = SelectProxies(nfds, readfds_in, writefds_in, errorfds_in,
+    const s32 ready = SelectProxies(m_session_id, nfds, readfds_in, writefds_in, errorfds_in,
                                     readfds_out, writefds_out, errorfds_out, &has_proxy, &has_real);
     if (!has_proxy) {
         R_RETURN(ForwardToRealService());
@@ -1077,7 +1077,7 @@ Result BsdMitmService::Select(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
         R_SUCCEED();
     }
     has_proxy = has_real = false;
-    const s32 proxy_ready = SelectProxies(nfds, readfds_in, writefds_in, errorfds_in,
+    const s32 proxy_ready = SelectProxies(m_session_id, nfds, readfds_in, writefds_in, errorfds_in,
                                           readfds_out, writefds_out, errorfds_out, &has_proxy, &has_real);
     R_RETURN(Reply(out_ret, out_errno, out.ret + proxy_ready));
 }
@@ -1097,7 +1097,7 @@ Result BsdMitmService::Poll(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
 
     bool has_proxy = false;
     bool has_real = false;
-    const s32 ready = PollProxies(poll_fds, count, &has_proxy, &has_real);
+    const s32 ready = PollProxies(m_session_id, poll_fds, count, &has_proxy, &has_real);
     if (!has_proxy) {
         R_RETURN(ForwardToRealService());
     }
@@ -1124,7 +1124,7 @@ Result BsdMitmService::Poll(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
         R_SUCCEED();
     }
     has_proxy = has_real = false;
-    const s32 proxy_ready = PollProxies(poll_fds, count, &has_proxy, &has_real);
+    const s32 proxy_ready = PollProxies(m_session_id, poll_fds, count, &has_proxy, &has_real);
     R_RETURN(Reply(out_ret, out_errno, out.ret + proxy_ready));
 }
 
@@ -1141,13 +1141,13 @@ Result BsdMitmService::Ioctl(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
     AMS_UNUSED(bufcount, in2, in3, in4, out2, out3, out4);
     m_command_count++;
 
-    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(fd);
+    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(Key(fd));
 
     if (request == static_cast<u32>(rb::IoctlRequest::FioNbio) && in1.GetSize() >= sizeof(s32)) {
         // Record it for a proxy created later, then let the real fd see it too.
         s32 value;
         std::memcpy(&value, in1.GetPointer(), sizeof(value));
-        UpdateSocketInfo(fd, [&](SocketInfo& info) { info.non_blocking = (value != 0); });
+        UpdateSocketInfo(Key(fd), [&](SocketInfo& info) { info.non_blocking = (value != 0); });
         if (proxy != nullptr) {
             proxy->SetNonBlocking(value != 0);
         }
@@ -1173,8 +1173,8 @@ Result BsdMitmService::Fcntl(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 f
     // F_GETFL can always be answered by the real service.
     if (cmd == static_cast<s32>(rb::FcntlCommand::SetFl)) {
         const bool non_blocking = (arg & static_cast<s32>(rb::FileStatusFlags::NonBlock)) != 0;
-        UpdateSocketInfo(fd, [&](SocketInfo& info) { info.non_blocking = non_blocking; });
-        if (auto proxy = ProxySocketManager::GetInstance().GetProxySocket(fd); proxy != nullptr) {
+        UpdateSocketInfo(Key(fd), [&](SocketInfo& info) { info.non_blocking = non_blocking; });
+        if (auto proxy = ProxySocketManager::GetInstance().GetProxySocket(Key(fd)); proxy != nullptr) {
             proxy->SetNonBlocking(non_blocking);
         }
     }
@@ -1185,7 +1185,7 @@ Result BsdMitmService::GetSockOpt(sf::Out<s32> out_ret, sf::Out<s32> out_errno, 
                                   s32 fd, s32 level, s32 optname, sf::OutAutoSelectBuffer optval) {
     m_command_count++;
 
-    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(fd);
+    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(Key(fd));
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }
@@ -1206,15 +1206,15 @@ Result BsdMitmService::SetSockOpt(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
         if (optname == static_cast<s32>(rb::SocketOption::Broadcast) && optval.GetSize() >= sizeof(s32)) {
             s32 value;
             std::memcpy(&value, optval.GetPointer(), sizeof(value));
-            UpdateSocketInfo(fd, [&](SocketInfo& info) { info.broadcast = (value != 0); });
+            UpdateSocketInfo(Key(fd), [&](SocketInfo& info) { info.broadcast = (value != 0); });
         } else if (optname == static_cast<s32>(rb::SocketOption::RcvTimeo) && optval.GetSize() >= sizeof(rb::Timeval)) {
             rb::Timeval tv;
             std::memcpy(&tv, optval.GetPointer(), sizeof(tv));
-            UpdateSocketInfo(fd, [&](SocketInfo& info) { info.rcv_timeout_ns = rb::TimevalToNanoseconds(tv); });
+            UpdateSocketInfo(Key(fd), [&](SocketInfo& info) { info.rcv_timeout_ns = rb::TimevalToNanoseconds(tv); });
         }
     }
 
-    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(fd);
+    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(Key(fd));
     if (proxy != nullptr) {
         R_RETURN(Reply(out_ret, out_errno, ErrnoResult(proxy->SetSockOpt(level, optname, optval.GetPointer(), optval.GetSize()))));
     }
@@ -1225,7 +1225,7 @@ Result BsdMitmService::Shutdown(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s3
     m_command_count++;
 
     // shutdown() is how a game unblocks a receiver, so it must reach the proxy.
-    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(fd);
+    auto proxy = ProxySocketManager::GetInstance().GetProxySocket(Key(fd));
     if (proxy == nullptr) {
         R_RETURN(ForwardToRealService());
     }

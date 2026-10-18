@@ -530,6 +530,26 @@ TEST(getsockname_returns_network_order) {
     ASSERT_EQ(out.GetPort(), 12345);
 }
 
+// ============================================================================
+// Socket keys (fd numbering is per bsd:u client)
+// ============================================================================
+
+TEST(same_fd_in_two_sessions_has_two_keys) {
+    ASSERT_TRUE(rb::SocketKey(1, 0) != rb::SocketKey(2, 0));
+    ASSERT_EQ(rb::SocketKey(1, 5) & 0xFFFFFFFFu, 5u);
+}
+
+TEST(same_fd_in_two_sessions_gets_two_proxies) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    auto a = m.CreateProxySocket(rb::SocketKey(1, 0), rb::SocketType::Dgram, rb::ProtocolType::Udp);
+    auto b = m.CreateProxySocket(rb::SocketKey(2, 0), rb::SocketType::Dgram, rb::ProtocolType::Udp);
+    ASSERT_TRUE(a != nullptr && b != nullptr && a != b);
+    ASSERT_TRUE(m.CloseProxySocket(rb::SocketKey(2, 0)));
+    ASSERT_TRUE(m.GetProxySocket(rb::SocketKey(1, 0)) == a);
+    m.Reset();
+}
+
 TEST(timeval_to_nanoseconds) {
     ASSERT_EQ(rb::TimevalToNanoseconds({1, 500000}), 1500000000LL);
     ASSERT_EQ(rb::TimevalToNanoseconds({0, 0}), 0LL);

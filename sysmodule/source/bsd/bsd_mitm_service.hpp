@@ -197,6 +197,9 @@ private:
     u32 m_command_count = 0;
     /// Unique session ID for debugging (assigned in constructor)
     u32 m_session_id = 0;
+
+    /// Key of fd in the socket tables.
+    u64 Key(s32 fd) const { return ryu_ldn::bsd::SocketKey(m_session_id, fd); }
     /// Whether RegisterClient was called on this session
     /// Sessions without RegisterClient should not be used for socket operations
     bool m_registered = false;

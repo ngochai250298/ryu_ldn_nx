@@ -27,12 +27,12 @@ ProxySocketManager& ProxySocketManager::GetInstance() {
 // Socket Management
 // =============================================================================
 
-std::shared_ptr<ProxySocket> ProxySocketManager::CreateProxySocket(s32 fd, ryu_ldn::bsd::SocketType type,
+std::shared_ptr<ProxySocket> ProxySocketManager::CreateProxySocket(u64 key, ryu_ldn::bsd::SocketType type,
                                                                     ryu_ldn::bsd::ProtocolType protocol) {
     std::scoped_lock lock(m_mutex);
 
     // Already exists - return existing
-    auto it = m_sockets.find(fd);
+    auto it = m_sockets.find(key);
     if (it != m_sockets.end()) {
         return it->second;
     }
@@ -46,18 +46,18 @@ std::shared_ptr<ProxySocket> ProxySocketManager::CreateProxySocket(s32 fd, ryu_l
     // constructor running at address 0.
     ProxySocket* raw = new (std::nothrow) ProxySocket(type, protocol);
     if (raw == nullptr) {
-        LOG_WARN("ProxySocketManager: out of memory creating proxy for fd=%d", fd);
+        LOG_WARN("ProxySocketManager: out of memory creating proxy for key=0x%lx", static_cast<unsigned long>(key));
         return nullptr;
     }
     std::shared_ptr<ProxySocket> socket(raw);
-    m_sockets[fd] = socket;
+    m_sockets[key] = socket;
     return socket;
 }
 
-std::shared_ptr<ProxySocket> ProxySocketManager::GetProxySocket(s32 fd) {
+std::shared_ptr<ProxySocket> ProxySocketManager::GetProxySocket(u64 key) {
     std::scoped_lock lock(m_mutex);
 
-    auto it = m_sockets.find(fd);
+    auto it = m_sockets.find(key);
     if (it != m_sockets.end()) {
         return it->second;
     }
@@ -65,9 +65,9 @@ std::shared_ptr<ProxySocket> ProxySocketManager::GetProxySocket(s32 fd) {
     return nullptr;
 }
 
-bool ProxySocketManager::IsProxySocket(s32 fd) const {
+bool ProxySocketManager::IsProxySocket(u64 key) const {
     std::scoped_lock lock(m_mutex);
-    return m_sockets.find(fd) != m_sockets.end();
+    return m_sockets.find(key) != m_sockets.end();
 }
 
 // Sockets are taken out of the registry under m_mutex and closed after it is
@@ -75,12 +75,12 @@ bool ProxySocketManager::IsProxySocket(s32 fd) const {
 // which takes m_mutex itself. Handlers still holding a reference keep the
 // object alive and see it Closed.
 
-bool ProxySocketManager::CloseProxySocket(s32 fd) {
+bool ProxySocketManager::CloseProxySocket(u64 key) {
     std::shared_ptr<ProxySocket> socket;
     {
         std::scoped_lock lock(m_mutex);
 
-        auto it = m_sockets.find(fd);
+        auto it = m_sockets.find(key);
         if (it == m_sockets.end()) {
             return false;
         }

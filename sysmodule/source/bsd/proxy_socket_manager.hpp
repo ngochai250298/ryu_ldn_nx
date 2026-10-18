@@ -129,7 +129,7 @@ public:
      * Called when we detect that a socket should be proxied (LDN address
      * in Bind or Connect).
      *
-     * @param fd File descriptor from the real BSD service
+     * @param key Socket key (session and fd, see ryu_ldn::bsd::SocketKey)
      * @param type Socket type (Stream or Dgram)
      * @param protocol Protocol type (Tcp or Udp)
      * @return The proxy socket (the existing one if fd already has one),
@@ -137,45 +137,45 @@ public:
      *
      * @note Thread-safe
      */
-    /// @gdb{tag="BSD:SOCKET", msg="CreateProxySocket: fd=%d type=%d protocol=%d", args="$x1, $x2, $x3"}
-    std::shared_ptr<ProxySocket> CreateProxySocket(s32 fd, ryu_ldn::bsd::SocketType type, ryu_ldn::bsd::ProtocolType protocol);
+    /// @gdb{tag="BSD:SOCKET", msg="CreateProxySocket: key=0x%lx type=%d protocol=%d", args="$x1, $x2, $x3"}
+    std::shared_ptr<ProxySocket> CreateProxySocket(u64 key, ryu_ldn::bsd::SocketType type, ryu_ldn::bsd::ProtocolType protocol);
 
     /**
      * @brief Get the proxy socket for a file descriptor
      *
-     * @param fd File descriptor to look up
+     * @param key Socket key to look up
      * @return The ProxySocket, or nullptr if not a proxy socket
      *
      * @note Thread-safe
      * @note The returned reference keeps the socket alive after a concurrent
      *       Close/Reset; the socket is then in the Closed state.
      */
-    /// @gdb{tag="BSD:SOCKET", msg="GetProxySocket: fd=%d", args="$x1"}
-    std::shared_ptr<ProxySocket> GetProxySocket(s32 fd);
+    /// @gdb{tag="BSD:SOCKET", msg="GetProxySocket: key=0x%lx", args="$x1"}
+    std::shared_ptr<ProxySocket> GetProxySocket(u64 key);
 
     /**
      * @brief Check if a file descriptor has an associated proxy socket
      *
-     * @param fd File descriptor to check
+     * @param key Socket key to check
      * @return true if fd is a proxy socket, false otherwise
      *
      * @note Thread-safe
      */
-    bool IsProxySocket(s32 fd) const;
+    bool IsProxySocket(u64 key) const;
 
     /**
      * @brief Close and remove a proxy socket
      *
      * Called when the game closes the socket.
      *
-     * @param fd File descriptor to close
+     * @param key Socket key to close
      * @return true if a proxy socket was closed, false if not found
      *
      * @note Thread-safe
      * @note Also releases any allocated ephemeral port
      */
-    /// @gdb{tag="BSD:SOCKET", msg="CloseProxySocket: fd=%d", args="$x1"}
-    bool CloseProxySocket(s32 fd);
+    /// @gdb{tag="BSD:SOCKET", msg="CloseProxySocket: key=0x%lx", args="$x1"}
+    bool CloseProxySocket(u64 key);
 
     /**
      * @brief Close all proxy sockets
@@ -574,7 +574,7 @@ private:
     /**
      * @brief Map of file descriptor to ProxySocket
      */
-    std::unordered_map<s32, std::shared_ptr<ProxySocket>> m_sockets;
+    std::unordered_map<u64, std::shared_ptr<ProxySocket>> m_sockets;
 
     /**
      * @brief Ephemeral port pool

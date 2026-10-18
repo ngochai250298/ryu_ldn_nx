@@ -64,6 +64,17 @@ inline bool IsLdnAddress(uint32_t ip) {
 }
 
 /**
+ * @brief Key of a socket in the MITM's socket tables
+ *
+ * Each registered bsd:u client (one BsdMitmService object, shared by its
+ * clones) has its own fd numbering, so fd alone is ambiguous when a game
+ * holds several clients. The session id is never 0, so no key is a bare fd.
+ */
+constexpr uint64_t SocketKey(uint32_t session_id, int32_t fd) {
+    return (static_cast<uint64_t>(session_id) << 32) | static_cast<uint32_t>(fd);
+}
+
+/**
  * @brief Whether a datagram to this destination goes through the LDN proxy
  *
  * LDN addresses, plus the broadcasts the server understands: the limited
