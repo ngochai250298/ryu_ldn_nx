@@ -53,6 +53,17 @@ ENV PATH="/opt/codeql:${PATH}"
 # package databases from pkg.devkitpro.org, which is behind Cloudflare
 # and returns 403 to non-browser requests, breaking the build.
 
+# Atmosphere-libs 1.12.1 uses FsStorageForBatchRead, which no libnx release
+# ships yet (added in switchbrew/libnx cd824f90, after v4.12.0). Build libnx
+# from the master commit current at the Atmosphere 1.12.1 release.
+# Drop this step once a libnx release newer than 4.12.0 is in the base image.
+ARG LIBNX_REV=20cbcfd90567f7bf84df7725f27e345e2164fa6b
+RUN git init /tmp/libnx && cd /tmp/libnx && \
+    git fetch --depth 1 https://github.com/switchbrew/libnx.git ${LIBNX_REV} && \
+    git checkout -q FETCH_HEAD && \
+    make -C nx -j$(nproc) install && \
+    cd / && rm -rf /tmp/libnx
+
 # Configure GDB to allow auto-loading scripts from any path
 RUN mkdir -p /root/.config/gdb && \
     echo "set auto-load safe-path /" > /root/.config/gdb/gdbinit
