@@ -346,6 +346,11 @@ void WssClient::disconnect() {
     // resets it under the receive lock, and nothing is delivered meanwhile
     // because receive_packet() checks the connection first.
     close_transport(true);
+    // The teardown only shut the socket down, which wakes a reader polling
+    // it. Close once that reader is out (it holds m_recv_mutex across the
+    // poll), so its fd number is never freed under it.
+    std::scoped_lock recv_lock(m_recv_mutex);
+    m_socket.close();
 }
 
 bool WssClient::is_connected() const {
@@ -618,10 +623,13 @@ void WssClient::close_transport(bool send_close) {
 }
 
 /**
- * @brief Free the TLS session and close the socket (m_tls_mutex held)
+ * @brief Free the TLS session and shut the socket down (m_tls_mutex held)
  *
  * Every mbedTLS call runs under m_tls_mutex and re-checks m_ws_ready, so
  * a reader or writer on another thread can never touch a freed context.
+ * The socket is shut down, not closed: the receive thread polls it
+ * without m_tls_mutex, and a sender can get here from a failed write.
+ * disconnect() or the next connect() closes it.
  *
  * @param lost true when an error ended the connection: receive_packet()
  *             then reports ConnectionLost until the next connect
@@ -633,7 +641,7 @@ void WssClient::teardown_locked(bool lost) {
     m_ws_ready = false;
     mbedtls_ssl_free(&m_ssl);
     mbedtls_ssl_init(&m_ssl);
-    m_socket.close();
+    m_socket.shutdown();
 }
 
 /**
