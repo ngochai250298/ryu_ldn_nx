@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <cstdarg>
 #include <new>
 
 #ifdef __SWITCH__
@@ -65,10 +66,13 @@ void safe_strcpy(char* dest, const char* src, size_t max_len) {
 uint32_t s_warning_count = 0;
 char s_first_warning[96] = {0};
 
-void note_warning(const char* key, const char* value) {
+__attribute__((format(printf, 1, 2)))
+void note_warning(const char* fmt, ...) {
     if (s_warning_count++ == 0) {
-        std::snprintf(s_first_warning, sizeof(s_first_warning),
-                      "invalid boolean for %s: '%.40s'", key, value);
+        va_list args;
+        va_start(args, fmt);
+        std::vsnprintf(s_first_warning, sizeof(s_first_warning), fmt, args);
+        va_end(args);
     }
 }
 
@@ -90,8 +94,110 @@ bool parse_bool(const char* value, bool fallback, const char* key) {
     };
     if (eq("1") || eq("true")) return true;
     if (eq("0") || eq("false")) return false;
-    note_warning(key, value);
+    note_warning("invalid boolean for %s: '%.40s'", key, value);
     return fallback;
+}
+
+/**
+ * @brief Button names for `[ldn] real_wireless_button`, in canonical order
+ *
+ * Bits are HidNpadButton values: Atmosphere's override status reports the
+ * buttons held at launch in that layout.
+ */
+struct ButtonName {
+    const char* name;
+    uint64_t bit;
+};
+constexpr ButtonName kButtons[] = {
+    {"A", 1ULL << 0},  {"B", 1ULL << 1},  {"X", 1ULL << 2},  {"Y", 1ULL << 3},
+    {"L", 1ULL << 6},  {"R", 1ULL << 7},  {"ZL", 1ULL << 8}, {"ZR", 1ULL << 9},
+    {"PLUS", 1ULL << 10}, {"MINUS", 1ULL << 11},
+    {"LSTICK", 1ULL << 4}, {"RSTICK", 1ULL << 5},
+    {"DLEFT", 1ULL << 12}, {"DUP", 1ULL << 13}, {"DRIGHT", 1ULL << 14}, {"DDOWN", 1ULL << 15},
+};
+
+/// Case-insensitive match of @p len chars at @p text against upper-case @p name
+constexpr bool name_is(const char* name, const char* text, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        char c = text[i];
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        if (name[i] != c) return false;  // also stops at the end of name
+    }
+    return name[len] == '\0';
+}
+
+constexpr uint64_t button_bit(const char* text, size_t len) {
+    for (const auto& b : kButtons) {
+        if (name_is(b.name, text, len)) return b.bit;
+    }
+    return 0;
+}
+
+constexpr uint64_t button_bit(const char* name) {
+    size_t len = 0;
+    while (name[len] != '\0') len++;
+    return button_bit(name, len);
+}
+
+#ifdef __SWITCH__
+static_assert(button_bit("A") == HidNpadButton_A);
+static_assert(button_bit("B") == HidNpadButton_B);
+static_assert(button_bit("X") == HidNpadButton_X);
+static_assert(button_bit("Y") == HidNpadButton_Y);
+static_assert(button_bit("L") == HidNpadButton_L);
+static_assert(button_bit("R") == HidNpadButton_R);
+static_assert(button_bit("ZL") == HidNpadButton_ZL);
+static_assert(button_bit("ZR") == HidNpadButton_ZR);
+static_assert(button_bit("PLUS") == HidNpadButton_Plus);
+static_assert(button_bit("MINUS") == HidNpadButton_Minus);
+static_assert(button_bit("LSTICK") == HidNpadButton_StickL);
+static_assert(button_bit("RSTICK") == HidNpadButton_StickR);
+static_assert(button_bit("DLEFT") == HidNpadButton_Left);
+static_assert(button_bit("DUP") == HidNpadButton_Up);
+static_assert(button_bit("DRIGHT") == HidNpadButton_Right);
+static_assert(button_bit("DDOWN") == HidNpadButton_Down);
+#endif
+static_assert(button_bit("ZR") == DEFAULT_REAL_WIRELESS_BUTTON);
+
+/**
+ * @brief Parse "ZL+ZR" style button lists (case-insensitive, spaces around
+ *        '+' allowed) or "none" (mask 0)
+ * @return false, leaving @p mask alone, if any part is not a button name
+ */
+bool parse_button_list(const char* value, uint64_t& mask) {
+    const char* p = trim_start(value);
+    if (name_is("NONE", p, 4) && *trim_start(p + 4) == '\0') {
+        mask = 0;
+        return true;
+    }
+    uint64_t result = 0;
+    for (;;) {
+        p = trim_start(p);
+        size_t len = 0;
+        while (p[len] != '\0' && p[len] != '+' && p[len] != ' ' && p[len] != '\t') len++;
+        uint64_t bit = button_bit(p, len);
+        if (bit == 0) return false;
+        result |= bit;
+        p = trim_start(p + len);
+        if (*p == '\0') break;
+        if (*p != '+') return false;
+        p++;
+    }
+    mask = result;
+    return true;
+}
+
+/// Canonical form of a button mask: names in kButtons order joined by '+', or "none"
+void format_button_list(uint64_t mask, char* out, size_t out_size) {
+    size_t offset = 0;
+    out[0] = '\0';
+    for (const auto& b : kButtons) {
+        if ((mask & b.bit) && offset < out_size) {
+            int n = std::snprintf(out + offset, out_size - offset, "%s%s", offset ? "+" : "", b.name);
+            if (n > 0) offset += static_cast<size_t>(n);
+        }
+    }
+    if (offset == 0) std::snprintf(out, out_size, "none");
 }
 
 /**
@@ -216,6 +322,13 @@ void process_ldn_key(const char* key, const char* value, LdnConfig& config) {
         config.use_passphrase = parse_bool(value, config.use_passphrase, "ldn.use_passphrase");
     } else if (std::strcmp(key, "disable_p2p") == 0) {
         config.disable_p2p = parse_bool(value, config.disable_p2p, "ldn.disable_p2p");
+    } else if (std::strcmp(key, "real_wireless_button") == 0) {
+        if (!parse_button_list(value, config.real_wireless_button)) {
+            note_warning("invalid button list for ldn.real_wireless_button: '%.40s'", value);
+        } else if (config.real_wireless_button & (button_bit("L") | button_bit("R"))) {
+            // Accepted: the owner may have moved Atmosphere's keys
+            note_warning("ldn.real_wireless_button uses L/R, which Atmosphere reads at launch (L: no mods, R: hbmenu)");
+        }
     }
 }
 
@@ -360,6 +473,10 @@ size_t format_config_content(char* buffer, size_t buffer_size, const Config& con
     WRITE_LINE("passphrase = %s", config.ldn.passphrase);
     WRITE_LINE("; Disable P2P proxy (0/1) - like Ryujinx MultiplayerDisableP2p");
     WRITE_LINE("disable_p2p = %d", config.ldn.disable_p2p ? 1 : 0);
+    char buttons[80];
+    format_button_list(config.ldn.real_wireless_button, buttons, sizeof(buttons));
+    WRITE_LINE("; Hold while launching a game for real local wireless (e.g. ZR, ZL+ZR, none)");
+    WRITE_LINE("real_wireless_button = %s", buttons);
     WRITE_LINE("");
 
     WRITE_LINE("[debug]");
@@ -406,6 +523,7 @@ Config get_default_config() {
     config.ldn.passphrase[0] = '\0';
     config.ldn.use_passphrase = DEFAULT_USE_PASSPHRASE;
     config.ldn.disable_p2p = DEFAULT_DISABLE_P2P;
+    config.ldn.real_wireless_button = DEFAULT_REAL_WIRELESS_BUTTON;
 
     // Debug defaults
     config.debug.enabled = DEFAULT_DEBUG_ENABLED;

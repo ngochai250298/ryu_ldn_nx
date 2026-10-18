@@ -108,15 +108,22 @@ void InitializeConfig();
 /**
  * @brief Read the current [ldn] enabled value
  *
- * Called by the ldn:u and bsd:u ShouldMitm handlers when a process opens
- * the service, so a change made from the overlay applies to the next
- * game that starts.
+ * Called each time a game starts Local Wireless
+ * (CreateUserLocalCommunicationService), so a change applies to the next
+ * Local Wireless session.
  *
  * Thread-safe: Acquires g_config_mutex.
  *
  * @return true if LDN emulation is enabled
  */
 bool IsLdnEnabled();
+
+/**
+ * @brief Read `[ldn] real_wireless_button` (HidNpadButton mask, 0 = none)
+ *
+ * Thread-safe: Acquires g_config_mutex.
+ */
+uint64_t GetRealWirelessButton();
 
 /**
  * @brief Configuration IPC service implementation

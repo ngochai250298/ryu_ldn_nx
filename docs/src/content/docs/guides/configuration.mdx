@@ -138,6 +138,7 @@ The reconnect system uses a **fast first retry** (200ms for the first attempt on
 | `passphrase` | _(empty)_ | Room passphrase for private rooms (empty = public) |
 | `interface` | _(empty)_ | Parsed but **not used** — always auto-detects network interface |
 | `disable_p2p` | `1` | Disable P2P proxy (0=enable P2P, 1=relay only) |
+| `real_wireless_button` | `ZR` | Button held **while launching** a game for real local wireless on that launch (see below) |
 
 #### Online or real local wireless
 
@@ -145,8 +146,12 @@ No overlay is needed to choose. Each time a game starts Local Wireless, the sysm
 
 - **Online (server)** by default.
 - **Real local wireless** when the console has no network connection, since the server cannot be reached anyway.
-- **Real local wireless** for the whole launch when you **hold ZR while starting the game** (keep holding until the game starts loading, like Atmosphère's hold-R for the homebrew menu). Use this to play with an unmodded Switch in the same room.
+- **Real local wireless** for the whole launch when you **hold the real-wireless button (ZR by default) while starting the game** (keep holding until the game starts loading, like Atmosphère's hold-R for the homebrew menu). Pressing it later, once the game is running, does nothing: Atmosphère reads the buttons only at launch. Use this to play with an unmodded Switch in the same room.
 - **Real local wireless** when `enabled = 0`.
+
+`real_wireless_button` picks that button. Names (case-insensitive): `A` `B` `X` `Y` `L` `R` `ZL` `ZR` `PLUS` `MINUS` `LSTICK` `RSTICK` `DLEFT` `DUP` `DRIGHT` `DDOWN`. Join them with `+` for a combo that must all be held, for example `ZL+ZR`. `none` turns the button off. A value that cannot be read keeps `ZR` and logs a config warning.
+
+Avoid `L` and `R`. Atmosphère reads them at launch too: holding **L** starts the game without LayeredFS mods and cheats, and holding **R** opens the homebrew menu instead of the game. They are accepted (with a config warning) in case you changed Atmosphère's keys. `ZL` and `ZR` have no Atmosphère launch meaning, and neither alone opens the Ultrahand or Tesla overlay menu.
 
 Setting `disable_p2p = 1` forces relay mode through the server. This is more reliable for most setups but adds server load. Enable P2P (`disable_p2p = 0`) if UPnP port mapping works on your network — it allows direct peer connections and reduces latency.
 

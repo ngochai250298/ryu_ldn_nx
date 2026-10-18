@@ -15,8 +15,6 @@
 
 namespace ams::mitm::ldn {
 
-static_assert(ryu_ldn::ldn::RealWirelessKey == HidNpadButton_ZR);
-
 LdnMitMService::LdnMitMService(std::shared_ptr<::Service>&& s, const sm::MitmProcessInfo& c)
     : MitmServiceImplBase(std::forward<std::shared_ptr<::Service>>(s), c)
     , m_program_id(c.program_id)
@@ -58,10 +56,11 @@ Result LdnMitMService::CreateUserLocalCommunicationService(
     u32 ip = 0;
     const bool online = R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) && ip != 0;
     const bool enabled = ryu_ldn::ipc::IsLdnEnabled();
+    const u64 button = ryu_ldn::ipc::GetRealWirelessButton();
     const u64 keys = m_client_info.override_status.GetKeysHeld();
-    const bool relay = ryu_ldn::ldn::UseRelay(enabled, online, keys);
-    LOG_INFO("CreateUserLocalCommunicationService: program_id=0x%016lx enabled=%d online=%d keys=0x%lx -> %s",
-             m_program_id.value, enabled, online, keys, relay ? "relay" : "real wireless");
+    const bool relay = ryu_ldn::ldn::UseRelay(enabled, online, button, keys);
+    LOG_INFO("CreateUserLocalCommunicationService: program_id=0x%016lx enabled=%d online=%d button=0x%lx keys=0x%lx -> %s",
+             m_program_id.value, enabled, online, button, keys, relay ? "relay" : "real wireless");
 
     SharedState::GetInstance().SetRealWirelessPid(relay ? 0 : m_client_pid);
     R_UNLESS(relay, sm::mitm::ResultShouldForwardToSession());

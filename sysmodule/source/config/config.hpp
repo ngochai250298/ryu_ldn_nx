@@ -167,6 +167,14 @@ constexpr bool DEFAULT_USE_PASSPHRASE = false;
 /** @brief Default P2P proxy disabled state (matches config.ini.example: disable_p2p = 1) */
 constexpr bool DEFAULT_DISABLE_P2P = true;
 
+/**
+ * @brief Default real-wireless button: ZR (HidNpadButton_ZR)
+ *
+ * L and R are Atmosphere's own launch keys (L: no mods/cheats, R: hbmenu);
+ * ZL and ZR have no launch meaning and alone open no overlay menu.
+ */
+constexpr uint64_t DEFAULT_REAL_WIRELESS_BUTTON = 1ULL << 9;
+
 // -----------------------------------------------------------------------------
 // Default Values - Debug
 // -----------------------------------------------------------------------------
@@ -236,12 +244,15 @@ struct ServerConfig {
  * - `passphrase`: Passphrase for private rooms (max 64 chars)
  * - `use_passphrase`: Enable passphrase filtering (0/1) - false = public rooms
  * - `disable_p2p`: Disable P2P proxy (0/1) - like Ryujinx MultiplayerDisableP2p
+ * - `real_wireless_button`: Button(s) held while launching a game for real
+ *   Local Wireless: names joined with `+` (all held), or `none`
  */
 struct LdnConfig {
     bool enabled;                                    ///< Enable LDN emulation
     char passphrase[MAX_PASSPHRASE_LENGTH + 1];      ///< Room passphrase (null-terminated)
     bool use_passphrase;                             ///< Enable passphrase filtering (false = public rooms)
     bool disable_p2p;                                ///< Disable P2P proxy (like Ryujinx)
+    uint64_t real_wireless_button;                   ///< HidNpadButton mask held at launch for real Local Wireless (0 = none)
 };
 
 /**
@@ -305,6 +316,7 @@ struct Config {
  * - ldn.passphrase: "" (empty)
  * - ldn.use_passphrase: false (public rooms)
  * - ldn.disable_p2p: false
+ * - ldn.real_wireless_button: ZR
  * - debug.enabled: false
  * - debug.level: 1 (warnings)
  *
@@ -344,7 +356,9 @@ ConfigResult load_config(const char* path, Config& config);
  *
  * Config loading runs before the logger exists, so callers log this after
  * the fact. Booleans must be true/false/1/0; anything else keeps the
- * default and counts here.
+ * default and counts here. So does an unparseable real_wireless_button
+ * (default kept), and one that uses L or R (kept: it collides with
+ * Atmosphere's launch keys unless those were changed).
  *
  * @param first Optional buffer receiving a description of the first problem
  * @param first_size Size of @p first

@@ -9,7 +9,8 @@
  * A Local Wireless session goes to the relay unless one of these holds:
  * - `[ldn] enabled = 0`
  * - the console has no IP address (offline: the relay cannot work)
- * - RealWirelessKey was held while the game was launched
+ * - every button of `[ldn] real_wireless_button` (default ZR) was held
+ *   while the game was launched
  *
  * In those cases the game gets Nintendo's real ldn:u service (the radio).
  * The launch button comes from Atmosphere's override status, which the
@@ -34,17 +35,19 @@
 
 namespace ryu_ldn::ldn {
 
-/// Hold while launching a game to give that launch real Local Wireless (HidNpadButton_ZR)
-constexpr uint64_t RealWirelessKey = 1ULL << 9;
-
-/// True if RealWirelessKey was held when the game was launched
-constexpr bool HeldRealWirelessKey(uint64_t keys_held_at_launch) {
-    return (keys_held_at_launch & RealWirelessKey) != 0;
+/**
+ * @brief True if every button in @p button_mask was held when the game was launched
+ *
+ * @param button_mask `[ldn] real_wireless_button` (HidNpadButton bits); 0 (`none`) never matches
+ * @param keys_held_at_launch Atmosphere override status keys
+ */
+constexpr bool HeldRealWirelessButton(uint64_t button_mask, uint64_t keys_held_at_launch) {
+    return button_mask != 0 && (keys_held_at_launch & button_mask) == button_mask;
 }
 
 /// True to serve the session from the relay, false for the real ldn:u service
-constexpr bool UseRelay(bool ldn_enabled, bool online, uint64_t keys_held_at_launch) {
-    return ldn_enabled && online && !HeldRealWirelessKey(keys_held_at_launch);
+constexpr bool UseRelay(bool ldn_enabled, bool online, uint64_t button_mask, uint64_t keys_held_at_launch) {
+    return ldn_enabled && online && !HeldRealWirelessButton(button_mask, keys_held_at_launch);
 }
 
 /// Result descriptions for relay failures (shown as 2016-0101 .. 2016-0104)

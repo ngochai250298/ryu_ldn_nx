@@ -54,6 +54,7 @@
 #include "../ldn/ldn_shared_state.hpp"
 #include "../config/game_whitelist.hpp"
 #include "../ldn/ldn_route.hpp"
+#include "../config/config_ipc_service.hpp"
 
 // Atmosphere MITM dispatch macros for IPC forwarding
 #include <stratosphere/sf/sf_mitm_dispatch.h>
@@ -336,7 +337,8 @@ bool BsdMitmService::ShouldMitm(const sm::MitmProcessInfo& client_info) {
     }
 
     // Real-wireless button held at launch: leave the game's sockets untouched
-    if (ryu_ldn::ldn::HeldRealWirelessKey(client_info.override_status.GetKeysHeld())) {
+    if (ryu_ldn::ldn::HeldRealWirelessButton(ryu_ldn::ipc::GetRealWirelessButton(),
+                                             client_info.override_status.GetKeysHeld())) {
         LOG_INFO("BSD ShouldMitm #%u: SKIP (real wireless button held at launch)", call_id);
         return false;
     }

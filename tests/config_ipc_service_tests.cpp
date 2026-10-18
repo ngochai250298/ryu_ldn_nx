@@ -182,6 +182,7 @@ struct LdnConfig {
     char passphrase[65];
     bool use_passphrase;
     bool disable_p2p;
+    u64 real_wireless_button;
 };
 
 /**
@@ -229,6 +230,8 @@ void init_mock_config() {
 
     // P2P proxy default (disabled by default, meaning P2P is off)
     g_mock_config.ldn.disable_p2p = true;
+
+    g_mock_config.ldn.real_wireless_button = 1ULL << 9;  // ZR
 }
 
 } // namespace mock
@@ -378,7 +381,8 @@ bool IsLdnEnabled() {
  * true = our relay-backed service, false = forward to the real ldn:u.
  */
 bool LdnUsesRelay(bool online, u64 keys_held_at_launch) {
-    return ryu_ldn::ldn::UseRelay(IsLdnEnabled(), online, keys_held_at_launch);
+    return ryu_ldn::ldn::UseRelay(IsLdnEnabled(), online, g_mock_config.ldn.real_wireless_button,
+                                  keys_held_at_launch);
 }
 
 /**
@@ -389,7 +393,8 @@ bool LdnUsesRelay(bool online, u64 keys_held_at_launch) {
 bool BsdShouldMitm(u64 program_id, bool whitelisted, u64 keys_held_at_launch = 0) {
     if (program_id == 0x4200000000000010ULL) return false;  // our sysmodule
     if (program_id < 0x0100000000000000ULL) return false;   // system process
-    if (ryu_ldn::ldn::HeldRealWirelessKey(keys_held_at_launch)) return false;
+    if (ryu_ldn::ldn::HeldRealWirelessButton(g_mock_config.ldn.real_wireless_button,
+                                             keys_held_at_launch)) return false;
     return whitelisted;
 }
 
@@ -793,6 +798,8 @@ static constexpr u64 kSysmoduleProgramId = 0x0100000000000006ULL;  // usb, not w
 
 static constexpr u64 kZr = 1ULL << 9;  // HidNpadButton_ZR
 static constexpr u64 kR = 1ULL << 7;   // HidNpadButton_R (Atmosphere's hbmenu key)
+static constexpr u64 kZl = 1ULL << 8;  // HidNpadButton_ZL
+static constexpr u64 kA = 1ULL << 0;   // HidNpadButton_A
 
 /**
  * @test ldn:u route reads [ldn] enabled each time Local Wireless starts
@@ -851,6 +858,34 @@ TEST(bsd_should_mitm_ignores_enabled) {
 TEST(launch_button_skips_bsd_and_ldn_together) {
     ASSERT_FALSE(mock::BsdShouldMitm(kGameProgramId, true, kZr));
     ASSERT_FALSE(mock::LdnUsesRelay(true, kZr));
+}
+
+/**
+ * @test A combo needs every button held; extra buttons don't matter; none never matches
+ */
+TEST(ldn_route_button_combos) {
+    using ryu_ldn::ldn::UseRelay;
+
+    ASSERT_TRUE(UseRelay(true, true, kZl | kZr, 0));
+    ASSERT_TRUE(UseRelay(true, true, kZl | kZr, kZl));
+    ASSERT_TRUE(UseRelay(true, true, kZl | kZr, kZr));
+    ASSERT_FALSE(UseRelay(true, true, kZl | kZr, kZl | kZr));
+    ASSERT_FALSE(UseRelay(true, true, kZl | kZr, kZl | kZr | kA));
+
+    // none: no button combination reaches the real radio
+    ASSERT_TRUE(UseRelay(true, true, 0, 0));
+    ASSERT_TRUE(UseRelay(true, true, 0, ~0ULL));
+    ASSERT_FALSE(UseRelay(false, true, 0, 0));   // enabled = 0 still does
+    ASSERT_FALSE(UseRelay(true, false, 0, 0));   // and offline still does
+
+    // bsd:u follows the configured mask too
+    mock::init_mock_config();
+    mock::g_mock_config.ldn.real_wireless_button = kZl | kZr;
+    ASSERT_TRUE(mock::BsdShouldMitm(kGameProgramId, true, kZr));
+    ASSERT_FALSE(mock::BsdShouldMitm(kGameProgramId, true, kZl | kZr));
+    mock::g_mock_config.ldn.real_wireless_button = 0;
+    ASSERT_TRUE(mock::BsdShouldMitm(kGameProgramId, true, kZl | kZr));
+    mock::init_mock_config();
 }
 
 /**
@@ -1055,6 +1090,7 @@ int main() {
     RUN_TEST(ldn_route_launch_button);
     RUN_TEST(bsd_should_mitm_ignores_enabled);
     RUN_TEST(launch_button_skips_bsd_and_ldn_together);
+    RUN_TEST(ldn_route_button_combos);
     RUN_TEST(bsd_should_mitm_never_intercepts_system);
     RUN_TEST(relay_failure_codes);
 
