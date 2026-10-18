@@ -47,6 +47,7 @@ TEST_SOURCES := \
 	p2p_proxy_client_tests.cpp \
 	p2p_integration_tests.cpp \
 	p2p_create_network_tests.cpp \
+	p2p_frame_tests.cpp \
 	bsd_mitm_filter_tests.cpp
 
 # Implementation sources needed for tests
@@ -91,15 +92,16 @@ TARGET_P2P_PROXY := run_p2p_proxy_tests
 TARGET_P2P_CLIENT := run_p2p_proxy_client_tests
 TARGET_P2P_INTEGRATION := run_p2p_integration_tests
 TARGET_P2P_CREATE_NETWORK := run_p2p_create_network_tests
+TARGET_P2P_FRAME := run_p2p_frame_tests
 TARGET_BSD_MITM_FILTER := run_bsd_mitm_filter_tests
 TARGET_ALL := run_all_tests
 
 #---------------------------------------------------------------------------------
 # Build rules
 #---------------------------------------------------------------------------------
-.PHONY: all clean test test-protocol test-config test-config-manager test-log test-socket test-tcp-client test-connection-state test-reconnect test-client test-ldn-types test-ldn-state-machine test-ldn-proxy test-ldn-error test-ldn-integration test-overlay test-ipc-config test-config-ipc-service test-shared-state test-packet-dispatcher test-session-handler test-proxy-handler test-handler-integration test-upnp test-p2p-proxy test-p2p-client test-p2p-integration test-p2p-create-network test-bsd-mitm-filter coverage coverage-enforce coverage-full-enforce
+.PHONY: all clean test test-protocol test-config test-config-manager test-log test-socket test-tcp-client test-connection-state test-reconnect test-client test-ldn-types test-ldn-state-machine test-ldn-proxy test-ldn-error test-ldn-integration test-overlay test-ipc-config test-config-ipc-service test-shared-state test-packet-dispatcher test-session-handler test-proxy-handler test-handler-integration test-upnp test-p2p-proxy test-p2p-client test-p2p-integration test-p2p-create-network test-p2p-frame test-bsd-mitm-filter coverage coverage-enforce coverage-full-enforce
 
-all: $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_BSD_MITM_FILTER)
+all: $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_P2P_FRAME) $(TARGET_BSD_MITM_FILTER)
 
 # Protocol tests (header-only, no impl needed)
 $(TARGET_PROTOCOL): protocol_tests.o
@@ -209,6 +211,10 @@ $(TARGET_P2P_INTEGRATION): p2p_integration_tests.o
 $(TARGET_P2P_CREATE_NETWORK): p2p_create_network_tests.o
 	$(CXX) $(LDFLAGS) -o $@ $^
 
+# P2P frame parser tests (header-only real code: p2p/p2p_frame.hpp)
+$(TARGET_P2P_FRAME): p2p_frame_tests.o
+	$(CXX) $(LDFLAGS) -o $@ $^
+
 # BSD MITM filter tests (standalone, mirrors ShouldMitm program filter)
 $(TARGET_BSD_MITM_FILTER): bsd_mitm_filter_tests.o
 	$(CXX) $(LDFLAGS) -o $@ $^
@@ -252,7 +258,7 @@ ldn_proxy_handler.o: ../sysmodule/source/ldn/ldn_proxy_handler.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # Run all tests
-test: $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_P2P_CREATE_NETWORK) $(TARGET_BSD_MITM_FILTER)
+test: $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_P2P_CREATE_NETWORK) $(TARGET_P2P_FRAME) $(TARGET_BSD_MITM_FILTER)
 	@echo "=== Running Protocol Tests ==="
 	./$(TARGET_PROTOCOL)
 	@echo ""
@@ -333,6 +339,9 @@ test: $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG)
 	@echo ""
 	@echo "=== Running P2P CreateNetwork Tests ==="
 	./$(TARGET_P2P_CREATE_NETWORK)
+	@echo ""
+	@echo "=== Running P2P Frame Tests ==="
+	./$(TARGET_P2P_FRAME)
 	@echo ""
 	@echo "=== Running BSD MITM Filter Tests ==="
 	./$(TARGET_BSD_MITM_FILTER)
@@ -418,6 +427,9 @@ test-p2p-integration: $(TARGET_P2P_INTEGRATION)
 test-p2p-create-network: $(TARGET_P2P_CREATE_NETWORK)
 	./$(TARGET_P2P_CREATE_NETWORK)
 
+test-p2p-frame: $(TARGET_P2P_FRAME)
+	./$(TARGET_P2P_FRAME)
+
 test-bsd-mitm-filter: $(TARGET_BSD_MITM_FILTER)
 	./$(TARGET_BSD_MITM_FILTER)
 
@@ -489,7 +501,7 @@ coverage-full-enforce: clean
 	cd .. && python3 scripts/check-coverage.py --min $(MIN_COVERAGE) --root .
 
 clean:
-	rm -f *.o $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_P2P_CREATE_NETWORK) $(TARGET_BSD_MITM_FILTER)
+	rm -f *.o $(TARGET_PROTOCOL) $(TARGET_CONFIG) $(TARGET_CONFIG_MANAGER) $(TARGET_LOG) $(TARGET_SOCKET) $(TARGET_TCP_CLIENT) $(TARGET_CONNECTION_STATE) $(TARGET_RECONNECT) $(TARGET_CLIENT) $(TARGET_LDN_TYPES) $(TARGET_LDN_STATE_MACHINE) $(TARGET_LDN_PROXY) $(TARGET_LDN_ERROR) $(TARGET_LDN_INTEGRATION) $(TARGET_OVERLAY) $(TARGET_IPC_CONFIG) $(TARGET_CONFIG_IPC_SERVICE) $(TARGET_SHARED_STATE) $(TARGET_PACKET_DISPATCHER) $(TARGET_SESSION_HANDLER) $(TARGET_PROXY_HANDLER) $(TARGET_HANDLER_INTEGRATION) $(TARGET_UPNP) $(TARGET_P2P_PROXY) $(TARGET_P2P_CLIENT) $(TARGET_P2P_INTEGRATION) $(TARGET_P2P_CREATE_NETWORK) $(TARGET_P2P_FRAME) $(TARGET_BSD_MITM_FILTER)
 	rm -f *.gcno *.gcda *.gcov
 
 #---------------------------------------------------------------------------------
@@ -583,3 +595,7 @@ overlay_tests.o: overlay_tests.cpp
 ipc_config_tests.o: ipc_config_tests.cpp
 
 config_ipc_service_tests.o: config_ipc_service_tests.cpp
+
+p2p_frame_tests.o: p2p_frame_tests.cpp \
+	../sysmodule/source/p2p/p2p_frame.hpp \
+	../sysmodule/source/protocol/ryu_protocol.hpp

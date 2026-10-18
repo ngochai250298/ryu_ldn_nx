@@ -272,6 +272,10 @@ private:
     /// @gdb{tag="P2P:CLIENT", msg="Processing received data"}
     void ProcessData(const uint8_t* data, size_t size);
 
+    /// Handle one complete, header-validated frame.
+    void DispatchFrame(const ryu_ldn::protocol::LdnHeader& header,
+                       const uint8_t* payload, size_t len);
+
     // Protocol handlers
     /// @gdb{tag="P2P:MSG", msg="Client handling proxy config"}
     void HandleProxyConfig(const ryu_ldn::protocol::ProxyConfig& config);

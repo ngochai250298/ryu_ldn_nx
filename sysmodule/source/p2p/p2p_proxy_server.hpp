@@ -554,6 +554,10 @@ private:
     /// @gdb{tag="P2P:ROUTE", msg="Session data processing"}
     void ProcessData(const uint8_t* data, size_t size);
 
+    /// Handle one complete, header-validated frame.
+    void DispatchFrame(const ryu_ldn::protocol::LdnHeader& header,
+                       const uint8_t* payload, size_t len);
+
     // Protocol handlers
     /// @gdb{tag="P2P:ROUTE", msg="External proxy configured"}
     void HandleExternalProxy(const ryu_ldn::protocol::ExternalProxyConfig& config);

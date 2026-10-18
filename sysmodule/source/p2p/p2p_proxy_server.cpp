@@ -1951,106 +1951,88 @@ void P2pProxySession::ReceiveLoop() {
  * Multiple packets may be received in a single recv() call due to TCP streaming.
  */
 void P2pProxySession::ProcessData(const uint8_t* data, size_t size) {
-    size_t offset = 0;
+    size_t consumed = 0;
+    const FrameStatus status = ForEachFrame(data, size, consumed,
+        [this](const ryu_ldn::protocol::LdnHeader& header, const uint8_t* payload, size_t len) {
+            DispatchFrame(header, payload, len);
+            return m_connected;
+        });
 
-    while (offset < size) {
-        // =====================================================================
-        // Parse Header
-        // =====================================================================
+    if (status == FrameStatus::Invalid) {
+        LOG_WARN("P2P session: invalid frame header, disconnecting");
+        Disconnect(false);
+        return;
+    }
+    if (consumed < size && m_connected) {
+        LOG_WARN("P2P session: incomplete packet dropped (%zu bytes)", size - consumed);
+    }
+}
 
-        // Need at least header size
-        if (size - offset < sizeof(ryu_ldn::protocol::LdnHeader)) {
-            LOG_WARN("P2P session: incomplete header");
+/**
+ * @brief Dispatch one validated frame
+ *
+ * @p len is the payload length from a header ForEachFrame has validated,
+ * and all @p len bytes are present. Payload structs are copied out because
+ * the payload has no alignment guarantee.
+ */
+void P2pProxySession::DispatchFrame(const ryu_ldn::protocol::LdnHeader& header,
+                                    const uint8_t* payload, size_t len) {
+    using namespace ryu_ldn::protocol;
+
+    switch (static_cast<PacketId>(header.type)) {
+        case PacketId::ExternalProxy: {
+            // Client authentication packet
+            ExternalProxyConfig config;
+            if (len >= sizeof(config)) {
+                std::memcpy(&config, payload, sizeof(config));
+                HandleExternalProxy(config);
+            }
             break;
         }
 
-        const auto* header = reinterpret_cast<const ryu_ldn::protocol::LdnHeader*>(data + offset);
-
-        // Validate magic number
-        if (header->magic != ryu_ldn::protocol::PROTOCOL_MAGIC) {
-            LOG_WARN("P2P session: invalid packet magic 0x%08X", header->magic);
-            Disconnect(false);
-            return;
-        }
-
-        // Calculate total packet size
-        size_t packet_size = sizeof(ryu_ldn::protocol::LdnHeader) + static_cast<size_t>(header->data_size);
-
-        // Ensure we have the complete packet
-        if (offset + packet_size > size) {
-            // Incomplete packet in buffer
-            // This shouldn't happen with TCP unless buffer is too small
-            LOG_WARN("P2P session: incomplete packet (need %zu, have %zu)",
-                     packet_size, size - offset);
+        case PacketId::ProxyData: {
+            // Data transfer packet: ProxyDataHeader followed by the data
+            ProxyDataHeader pheader;
+            if (len >= sizeof(pheader)) {
+                std::memcpy(&pheader, payload, sizeof(pheader));
+                HandleProxyData(pheader, payload + sizeof(pheader), len - sizeof(pheader));
+            }
             break;
         }
 
-        // Get pointer to packet payload
-        const uint8_t* packet_data = data + offset + sizeof(ryu_ldn::protocol::LdnHeader);
-
-        // =====================================================================
-        // Dispatch by Packet Type
-        // =====================================================================
-
-        switch (static_cast<ryu_ldn::protocol::PacketId>(header->type)) {
-            case ryu_ldn::protocol::PacketId::ExternalProxy: {
-                // Client authentication packet
-                if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ExternalProxyConfig)) {
-                    const auto* config = reinterpret_cast<const ryu_ldn::protocol::ExternalProxyConfig*>(packet_data);
-                    HandleExternalProxy(*config);
-                }
-                break;
+        case PacketId::ProxyConnect: {
+            // Virtual TCP connect request
+            ProxyConnectRequest request;
+            if (len >= sizeof(request)) {
+                std::memcpy(&request, payload, sizeof(request));
+                HandleProxyConnect(request);
             }
-
-            case ryu_ldn::protocol::PacketId::ProxyData: {
-                // Data transfer packet
-                if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ProxyDataHeader)) {
-                    auto* pheader = const_cast<ryu_ldn::protocol::ProxyDataHeader*>(
-                        reinterpret_cast<const ryu_ldn::protocol::ProxyDataHeader*>(packet_data));
-                    const uint8_t* payload = packet_data + sizeof(ryu_ldn::protocol::ProxyDataHeader);
-                    size_t payload_len = static_cast<size_t>(header->data_size) - sizeof(ryu_ldn::protocol::ProxyDataHeader);
-                    HandleProxyData(*pheader, payload, payload_len);
-                }
-                break;
-            }
-
-            case ryu_ldn::protocol::PacketId::ProxyConnect: {
-                // Virtual TCP connect request
-                if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ProxyConnectRequest)) {
-                    auto* request = const_cast<ryu_ldn::protocol::ProxyConnectRequest*>(
-                        reinterpret_cast<const ryu_ldn::protocol::ProxyConnectRequest*>(packet_data));
-                    HandleProxyConnect(*request);
-                }
-                break;
-            }
-
-            case ryu_ldn::protocol::PacketId::ProxyConnectReply: {
-                // Virtual TCP connect response
-                if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ProxyConnectResponse)) {
-                    auto* response = const_cast<ryu_ldn::protocol::ProxyConnectResponse*>(
-                        reinterpret_cast<const ryu_ldn::protocol::ProxyConnectResponse*>(packet_data));
-                    HandleProxyConnectReply(*response);
-                }
-                break;
-            }
-
-            case ryu_ldn::protocol::PacketId::ProxyDisconnect: {
-                // Virtual TCP disconnect
-                if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ProxyDisconnectMessage)) {
-                    auto* message = const_cast<ryu_ldn::protocol::ProxyDisconnectMessage*>(
-                        reinterpret_cast<const ryu_ldn::protocol::ProxyDisconnectMessage*>(packet_data));
-                    HandleProxyDisconnect(*message);
-                }
-                break;
-            }
-
-            default:
-                LOG_WARN("P2P session: unhandled packet type %u", header->type);
-                break;
+            break;
         }
 
-        // Move to next packet
-        offset += packet_size;
+        case PacketId::ProxyConnectReply: {
+            // Virtual TCP connect response
+            ProxyConnectResponse response;
+            if (len >= sizeof(response)) {
+                std::memcpy(&response, payload, sizeof(response));
+                HandleProxyConnectReply(response);
+            }
+            break;
+        }
+
+        case PacketId::ProxyDisconnect: {
+            // Virtual TCP disconnect
+            ProxyDisconnectMessage message;
+            if (len >= sizeof(message)) {
+                std::memcpy(&message, payload, sizeof(message));
+                HandleProxyDisconnect(message);
+            }
+            break;
+        }
+
+        default:
+            LOG_WARN("P2P session: unhandled packet type %u", header.type);
+            break;
     }
 }
 

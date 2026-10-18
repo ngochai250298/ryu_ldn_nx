@@ -624,84 +624,78 @@ void P2pProxyClient::ReceiveLoop() {
  * @param size Number of bytes in buffer
  */
 void P2pProxyClient::ProcessData(const uint8_t* data, size_t size) {
-    size_t offset = 0;
+    size_t consumed = 0;
+    const FrameStatus status = ForEachFrame(data, size, consumed,
+        [this](const ryu_ldn::protocol::LdnHeader& header, const uint8_t* payload, size_t len) {
+            DispatchFrame(header, payload, len);
+            return true;
+        });
 
-    while (offset < size) {
-        // Need at least header
-        if (size - offset < sizeof(ryu_ldn::protocol::LdnHeader)) {
-            LOG_WARN("P2P client: incomplete header");
+    if (status == FrameStatus::Invalid) {
+        LOG_WARN("P2P client: invalid frame header, dropping %zu bytes", size - consumed);
+    } else if (consumed < size) {
+        LOG_WARN("P2P client: incomplete packet dropped (%zu bytes)", size - consumed);
+    }
+}
+
+/**
+ * @brief Dispatch one validated frame
+ *
+ * @p len is the payload length from a header ForEachFrame has validated,
+ * and all @p len bytes are present. Structs are copied out because the
+ * payload has no alignment guarantee.
+ */
+void P2pProxyClient::DispatchFrame(const ryu_ldn::protocol::LdnHeader& header,
+                                   const uint8_t* payload, size_t len) {
+    using namespace ryu_ldn::protocol;
+
+    switch (static_cast<PacketId>(header.type)) {
+        case PacketId::ProxyConfig: {
+            ProxyConfig config;
+            if (len >= sizeof(config)) {
+                std::memcpy(&config, payload, sizeof(config));
+                HandleProxyConfig(config);
+            }
             break;
         }
 
-        const auto* header = reinterpret_cast<const ryu_ldn::protocol::LdnHeader*>(data + offset);
-
-        // Validate magic
-        if (header->magic != ryu_ldn::protocol::PROTOCOL_MAGIC) {
-            LOG_WARN("P2P client: invalid magic 0x%08X", header->magic);
+        case PacketId::ProxyData: {
+            if (len >= sizeof(ProxyDataHeader)) {
+                HandleProxyData(payload, len);
+            }
             break;
         }
 
-        // Calculate total packet size
-        size_t packet_size = sizeof(ryu_ldn::protocol::LdnHeader) +
-                             static_cast<size_t>(header->data_size);
-
-        // Need complete packet
-        if (offset + packet_size > size) {
-            LOG_WARN("P2P client: incomplete packet (need %zu, have %zu)",
-                     packet_size, size - offset);
+        case PacketId::ProxyConnect: {
+            ProxyConnectRequest request;
+            if (len >= sizeof(request)) {
+                std::memcpy(&request, payload, sizeof(request));
+                HandleProxyConnect(request);
+            }
             break;
         }
 
-        // Get packet payload
-        const uint8_t* packet_data = data + offset + sizeof(ryu_ldn::protocol::LdnHeader);
-
-        // Dispatch by packet type
-        switch (static_cast<ryu_ldn::protocol::PacketId>(header->type)) {
-            case ryu_ldn::protocol::PacketId::ProxyConfig: {
-                if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ProxyConfig)) {
-                    const auto* config = reinterpret_cast<const ryu_ldn::protocol::ProxyConfig*>(packet_data);
-                    HandleProxyConfig(*config);
-                }
-                break;
+        case PacketId::ProxyConnectReply: {
+            ProxyConnectResponse response;
+            if (len >= sizeof(response)) {
+                std::memcpy(&response, payload, sizeof(response));
+                HandleProxyConnectReply(response);
             }
-
-            case ryu_ldn::protocol::PacketId::ProxyData: {
-                if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ProxyDataHeader)) {
-                    HandleProxyData(packet_data, static_cast<size_t>(header->data_size));
-                }
-                break;
-            }
-
-            case ryu_ldn::protocol::PacketId::ProxyConnect: {
-                if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ProxyConnectRequest)) {
-                    const auto* request = reinterpret_cast<const ryu_ldn::protocol::ProxyConnectRequest*>(packet_data);
-                    HandleProxyConnect(*request);
-                }
-                break;
-            }
-
-            case ryu_ldn::protocol::PacketId::ProxyConnectReply: {
-                if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ProxyConnectResponse)) {
-                    const auto* response = reinterpret_cast<const ryu_ldn::protocol::ProxyConnectResponse*>(packet_data);
-                    HandleProxyConnectReply(*response);
-                }
-                break;
-            }
-
-            case ryu_ldn::protocol::PacketId::ProxyDisconnect: {
-                if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ProxyDisconnectMessage)) {
-                    const auto* message = reinterpret_cast<const ryu_ldn::protocol::ProxyDisconnectMessage*>(packet_data);
-                    HandleProxyDisconnect(*message);
-                }
-                break;
-            }
-
-            default:
-                LOG_VERBOSE("P2P client: unknown packet type %u", header->type);
-                break;
+            break;
         }
 
-        offset += packet_size;
+        case PacketId::ProxyDisconnect: {
+            ProxyDisconnectMessage message;
+            if (len >= sizeof(message)) {
+                std::memcpy(&message, payload, sizeof(message));
+                HandleProxyDisconnect(message);
+            }
+            break;
+        }
+
+        default:
+            LOG_VERBOSE("P2P client: unknown packet type %u", header.type);
+            break;
     }
 }
 
