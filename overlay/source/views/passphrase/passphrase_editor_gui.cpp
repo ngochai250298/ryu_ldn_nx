@@ -7,6 +7,7 @@
  */
 
 #include "views/passphrase/passphrase_editor_gui.hpp"
+#include "app/config_actions.hpp"
 #include "app/overlay_state.hpp"
 #include "ryu_ldn_ipc.h"
 #include <cstring>
@@ -38,7 +39,7 @@ PassphraseEditorGui::~PassphraseEditorGui() {
 }
 
 tsl::elm::Element* PassphraseEditorGui::createUI() {
-    auto frame = new tsl::elm::OverlayFrame("Edit Passphrase", "Hex: 0-9, a-f");
+    auto frame = new tsl::elm::OverlayFrame("Edit Passphrase", "+ Save    B Cancel");
     auto list = new tsl::elm::List();
     if (OverlayState::Instance().GetStatus() != OverlayState::InitStatus::Loaded) {
         list->addItem(new tsl::elm::ListItem("Not available"));
@@ -115,9 +116,10 @@ bool PassphraseEditorGui::handleInput(u64 keysDown, u64 keysHeld, const HidTouch
         RefreshDisplay();
         return true;
     }
-    // B (back) = Apply passphrase and go back
-    if (keysDown & HidNpadButton_B) { ApplyPassphrase(); return true; }
-    // Plus = Apply
+    // B (back) = cancel, discard the edit. Backing out used to commit it,
+    // which silently moved the user into a different room.
+    if (keysDown & HidNpadButton_B) { tsl::goBack(); return true; }
+    // Plus = explicit confirm: apply, save and go back
     if (keysDown & HidNpadButton_Plus) { ApplyPassphrase(); return true; }
     return false;
 }
@@ -164,7 +166,9 @@ void PassphraseEditorGui::ApplyPassphrase() {
     char full[32];
     snprintf(full, sizeof(full), "Ryujinx-%s", BuildHexString().c_str());
     Result rc = ryuLdnSetPassphrase(svc, full);
-    if (R_SUCCEEDED(rc)) OverlayState::Instance().MarkDirty();
-    OverlayState::Instance().ReleaseUpdateLock();
+    if (R_SUCCEEDED(rc)) {
+        OverlayState::Instance().MarkDirty();
+        SaveIfDirty();  // leaving a settings page
+    }
     tsl::goBack();
 }
