@@ -239,6 +239,13 @@ bool P2pProxyClient::Connect(const uint8_t* ip_bytes, size_t ip_len, uint16_t po
         LOG_WARN("P2P client: failed to set TCP_NODELAY (errno=%d)", errno);
     }
 
+    struct timeval send_timeout;
+    send_timeout.tv_sec = SEND_TIMEOUT_MS / 1000;
+    send_timeout.tv_usec = (SEND_TIMEOUT_MS % 1000) * 1000;
+    if (setsockopt(m_socket_fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout)) < 0) {
+        LOG_WARN("P2P client: failed to set SO_SNDTIMEO (errno=%d)", errno);
+    }
+
     // Set non-blocking for connect with timeout
     int flags = fcntl(m_socket_fd, F_GETFL, 0);
     if (flags >= 0) {
@@ -461,10 +468,8 @@ bool P2pProxyClient::PerformAuth(const ryu_ldn::protocol::ExternalProxyConfig& c
                               config, len);
 
     // Send to host
-    ssize_t sent = send(m_socket_fd, packet, len, 0);
-    if (sent < 0 || static_cast<size_t>(sent) != len) {
-        LOG_ERROR("P2P client: failed to send auth packet (sent=%zd, errno=%d)",
-                  sent, errno);
+    if (!SendLocked(packet, len)) {
+        LOG_ERROR("P2P client: failed to send auth packet");
         return false;
     }
 
@@ -539,8 +544,20 @@ bool P2pProxyClient::Send(const void* data, size_t size) {
         return false;
     }
 
+    return SendLocked(data, size);
+}
+
+bool P2pProxyClient::SendLocked(const void* data, size_t size) {
     ssize_t sent = send(m_socket_fd, data, size, 0);
-    return sent >= 0 && static_cast<size_t>(sent) == size;
+    if (sent >= 0 && static_cast<size_t>(sent) == size) {
+        return true;
+    }
+    LOG_WARN("P2P client: send short/failed (size=%zu sent=%zd errno=%d)",
+             size, sent, errno);
+    // Shut down only: the recv thread wakes, marks the link down, and
+    // Disconnect() closes the fd later.
+    shutdown(m_socket_fd, SHUT_RDWR);
+    return false;
 }
 
 /**
@@ -564,8 +581,7 @@ bool P2pProxyClient::SendProxyData(const ryu_ldn::protocol::ProxyDataHeader& hea
         return false;
     }
 
-    ssize_t sent = send(m_socket_fd, m_send_buffer, len, 0);
-    return sent >= 0 && static_cast<size_t>(sent) == len;
+    return SendLocked(m_send_buffer, len);
 }
 
 /**

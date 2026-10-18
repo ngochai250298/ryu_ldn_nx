@@ -1,11 +1,12 @@
 /**
  * @file stratosphere.hpp
- * @brief Host stand-in for <stratosphere.hpp>, for the bsd proxy test suite
+ * @brief Host stand-in for <stratosphere.hpp>, for the bsd proxy and P2P
+ *        client send test suites
  *
- * Provides only what bsd/proxy_socket.cpp, bsd/proxy_socket_manager.cpp and
- * bsd/ephemeral_port_pool.cpp use, mapped onto the C++ standard library, so
- * the host tests compile and exercise the real proxy sources. It is on the
- * include path of the bsd-proxy suite only.
+ * Provides only what bsd/proxy_socket.cpp, bsd/proxy_socket_manager.cpp,
+ * bsd/ephemeral_port_pool.cpp and p2p/p2p_proxy_client.cpp use, mapped onto
+ * the C++ standard library, so the host tests compile and exercise the real
+ * sources. It is on the include path of those two suites only.
  *
  * @copyright Copyright (c) 2026 ryu_ldn_nx contributors
  * @license GPL-2.0-or-later
@@ -24,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -88,9 +90,43 @@ public:
     void lock() { m_mutex.lock(); }
     void unlock() { m_mutex.unlock(); }
     bool try_lock() { return m_mutex.try_lock(); }
+    void Lock() { lock(); }
+    void Unlock() { unlock(); }
+    std::mutex& native() { return m_mutex; }
 private:
     std::mutex m_mutex;
 };
+
+class ConditionVariable {
+public:
+    void TimedWait(Mutex& m, TimeSpan timeout) {
+        std::unique_lock<std::mutex> lk(m.native(), std::adopt_lock);
+        m_cv.wait_for(lk, std::chrono::nanoseconds(timeout.GetNanoSeconds()));
+        lk.release();
+    }
+    void Broadcast() { m_cv.notify_all(); }
+private:
+    std::condition_variable m_cv;
+};
+
+constexpr size_t ThreadStackAlignment = 0x1000;
+using ThreadFunction = void (*)(void*);
+
+struct ThreadType {
+    std::thread thread;
+    ThreadFunction func;
+    void* arg;
+};
+
+inline Result CreateThread(ThreadType* t, ThreadFunction func, void* arg,
+                           void* /*stack*/, size_t /*stack_size*/, s32 /*priority*/) {
+    t->func = func;
+    t->arg = arg;
+    return Result(0);
+}
+inline void StartThread(ThreadType* t) { t->thread = std::thread(t->func, t->arg); }
+inline void WaitThread(ThreadType* t) { if (t->thread.joinable()) t->thread.join(); }
+inline void DestroyThread(ThreadType* /*t*/) {}
 
 class SdkMutex {
 public:
