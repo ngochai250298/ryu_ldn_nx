@@ -119,9 +119,12 @@ RyuLdnClientConfig::RyuLdnClientConfig(const config::Config& cfg)
     std::memset(host, 0, sizeof(host));
     std::memcpy(host, cfg.server.host, sizeof(host) - 1);
 
-    // Copy passphrase, ensuring null termination
+    // Copy passphrase, ensuring null termination. With use_passphrase off
+    // the server must see an empty one (public rooms), whatever is stored.
     std::memset(passphrase, 0, sizeof(passphrase));
-    std::memcpy(passphrase, cfg.ldn.passphrase, sizeof(passphrase) - 1);
+    if (cfg.ldn.use_passphrase) {
+        std::memcpy(passphrase, cfg.ldn.passphrase, sizeof(passphrase) - 1);
+    }
 
     server = cfg.server;
 

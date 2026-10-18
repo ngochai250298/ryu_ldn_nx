@@ -272,6 +272,21 @@ bool test_config_from_app_config() {
     return true;
 }
 
+/**
+ * @brief The stored passphrase is sent only when use_passphrase is on
+ */
+bool test_config_passphrase_respects_use_passphrase() {
+    config::Config app_cfg = config::get_default_config();
+    std::strncpy(app_cfg.ldn.passphrase, "Ryujinx-1234abcd", sizeof(app_cfg.ldn.passphrase) - 1);
+
+    app_cfg.ldn.use_passphrase = false;
+    ASSERT_STREQ(RyuLdnClientConfig(app_cfg).passphrase, "");
+
+    app_cfg.ldn.use_passphrase = true;
+    ASSERT_STREQ(RyuLdnClientConfig(app_cfg).passphrase, "Ryujinx-1234abcd");
+    return true;
+}
+
 // ============================================================================
 // Construction / Move Tests
 // ============================================================================
@@ -2584,6 +2599,7 @@ int main() {
     printf("Configuration:\n");
     RUN_TEST(test_config_defaults);
     RUN_TEST(test_config_from_app_config);
+    RUN_TEST(test_config_passphrase_respects_use_passphrase);
 
     printf("\nConstruction:\n");
     RUN_TEST(test_default_construction);
