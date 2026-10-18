@@ -174,6 +174,14 @@ public:
      */
     SocketResult set_send_buffer_size(int size);
 
+    /**
+     * @brief Wait for socket to be ready (using poll)
+     * @param timeout_ms Timeout in milliseconds
+     * @param for_write true to wait for write, false for read
+     * @return SocketResult::Success, Timeout, or error
+     */
+    SocketResult wait_ready(uint32_t timeout_ms, bool for_write);
+
 private:
     int m_fd;
     bool m_connected;
@@ -183,14 +191,6 @@ private:
      * @return SocketResult::Success or error
      */
     SocketResult create();
-
-    /**
-     * @brief Wait for socket to be ready (using poll)
-     * @param timeout_ms Timeout in milliseconds
-     * @param for_write true to wait for write, false for read
-     * @return SocketResult::Success, Timeout, or error
-     */
-    SocketResult wait_ready(uint32_t timeout_ms, bool for_write);
 };
 
 // ============================================================================

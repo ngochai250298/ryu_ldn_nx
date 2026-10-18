@@ -185,7 +185,7 @@ ClientResult TcpClient::send_packet(protocol::PacketId type, const void* payload
     }
 
     // Send the encoded packet
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
 
     if (send_result != SocketResult::Success) {
         return socket_to_client_result(send_result);
@@ -209,7 +209,7 @@ ClientResult TcpClient::send_raw(const void* data, size_t size) {
     }
 
     // Send the already-encoded data directly
-    SocketResult send_result = m_socket.send_all(static_cast<const uint8_t*>(data), size);
+    SocketResult send_result = send_bytes(static_cast<const uint8_t*>(data), size);
 
     if (send_result != SocketResult::Success) {
         return socket_to_client_result(send_result);
@@ -237,7 +237,7 @@ ClientResult TcpClient::send_initialize(const protocol::InitializeMessage& msg) 
         return ClientResult::EncodingError;
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -260,7 +260,7 @@ ClientResult TcpClient::send_passphrase(const protocol::PassphraseMessage& msg) 
         return ClientResult::EncodingError;
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -297,7 +297,7 @@ ClientResult TcpClient::send_ping(const protocol::PingMessage& msg) {
         return ClientResult::EncodingError;
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -320,7 +320,7 @@ ClientResult TcpClient::send_disconnect(const protocol::DisconnectMessage& msg) 
         return ClientResult::EncodingError;
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -399,7 +399,7 @@ ClientResult TcpClient::send_create_access_point(const protocol::CreateAccessPoi
         ryu_ldn::debug::g_logger.flush();
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, offset);
+    SocketResult send_result = send_bytes(m_send_buffer, offset);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -436,7 +436,7 @@ ClientResult TcpClient::send_connect(const protocol::ConnectRequest& request) {
              m_send_buffer[24], m_send_buffer[25], m_send_buffer[26], m_send_buffer[27],
              m_send_buffer[28], m_send_buffer[29], m_send_buffer[30], m_send_buffer[31]);
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -480,7 +480,7 @@ ClientResult TcpClient::send_create_access_point_private(
         offset += advertise_size;
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, offset);
+    SocketResult send_result = send_bytes(m_send_buffer, offset);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -503,7 +503,7 @@ ClientResult TcpClient::send_connect_private(const protocol::ConnectPrivateReque
         return ClientResult::EncodingError;
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -526,7 +526,7 @@ ClientResult TcpClient::send_scan(const protocol::ScanFilterFull& filter) {
         return ClientResult::EncodingError;
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -553,7 +553,7 @@ ClientResult TcpClient::send_proxy_data(const protocol::ProxyDataHeader& header,
         return ClientResult::EncodingError;
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -576,7 +576,7 @@ ClientResult TcpClient::send_set_accept_policy(const protocol::SetAcceptPolicyRe
         return ClientResult::EncodingError;
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -610,7 +610,7 @@ ClientResult TcpClient::send_set_advertise_data(const uint8_t* data, size_t size
     }
 
     size_t total_size = sizeof(header) + size;
-    SocketResult send_result = m_socket.send_all(m_send_buffer, total_size);
+    SocketResult send_result = send_bytes(m_send_buffer, total_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -633,7 +633,7 @@ ClientResult TcpClient::send_reject(const protocol::RejectRequest& request) {
         return ClientResult::EncodingError;
     }
 
-    SocketResult send_result = m_socket.send_all(m_send_buffer, encoded_size);
+    SocketResult send_result = send_bytes(m_send_buffer, encoded_size);
     return send_result == SocketResult::Success ? ClientResult::Success : socket_to_client_result(send_result);
 }
 
@@ -783,6 +783,16 @@ ClientResult TcpClient::socket_to_client_result(SocketResult socket_result) {
         default:
             return ClientResult::InternalError;
     }
+}
+
+/**
+ * @brief Write one encoded packet to the transport
+ *
+ * Plain TCP writes the bytes as-is. Transports that wrap the stream
+ * (e.g. WssClient) override this.
+ */
+SocketResult TcpClient::send_bytes(const uint8_t* data, size_t size) {
+    return m_socket.send_all(data, size);
 }
 
 /**

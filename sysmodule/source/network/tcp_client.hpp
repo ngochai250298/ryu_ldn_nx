@@ -460,7 +460,7 @@ public:
      */
     ClientResult set_nodelay(bool enable) override;
 
-private:
+protected:
     Socket m_socket;                                 ///< Underlying TCP socket
     protocol::PacketBuffer<0x2000> m_recv_buffer;    ///< Buffer for TCP stream reassembly (8KB - saves 56KB!)
     uint8_t m_send_buffer[2048];                     ///< Buffer for encoding outgoing packets
@@ -492,7 +492,19 @@ private:
      * @return ClientResult::Success if data received or would block
      * @return Error result on connection failure
      */
-    ClientResult receive_into_buffer(int32_t timeout_ms);
+    virtual ClientResult receive_into_buffer(int32_t timeout_ms);
+
+    /**
+     * @brief Write one fully encoded packet to the transport
+     *
+     * Every send_* method encodes exactly one packet and hands it here, so
+     * a framing transport can wrap it as one message.
+     *
+     * @param data Encoded packet (header + payload)
+     * @param size Size of data in bytes
+     * @return SocketResult::Success if everything was written
+     */
+    virtual SocketResult send_bytes(const uint8_t* data, size_t size);
 };
 
 } // namespace ryu_ldn::network
