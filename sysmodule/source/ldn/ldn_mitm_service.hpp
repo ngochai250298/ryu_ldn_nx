@@ -50,11 +50,11 @@ public:
      * @brief Determine if we should MITM this process
      *
      * This is called by Atmosphere to determine if we should intercept
-     * calls from a specific process. We always return true to intercept
-     * all LDN calls.
+     * calls from a specific process. Intercepts while [ldn] enabled is set;
+     * otherwise the process gets the real ldn:u service.
      *
      * @param client_info Process information for the client
-     * @return true Always intercept
+     * @return true if LDN emulation is enabled
      */
     /// @gdb{tag="LDN:LIFECYCLE", msg="ShouldMitm check"}
     static bool ShouldMitm(const sm::MitmProcessInfo& client_info);

@@ -352,6 +352,32 @@ public:
     }
 };
 
+/**
+ * @brief Mirrors ryu_ldn::ipc::IsLdnEnabled() (reads the live config)
+ */
+bool IsLdnEnabled() {
+    return g_mock_config.ldn.enabled;
+}
+
+/**
+ * @brief Mirrors LdnMitMService::ShouldMitm (ldn:u)
+ */
+bool LdnShouldMitm() {
+    return IsLdnEnabled();
+}
+
+/**
+ * @brief Mirrors the gate order of BsdMitmService::ShouldMitm (bsd:u)
+ *
+ * The per-PID dummy-session skip that follows these checks is not modelled.
+ */
+bool BsdShouldMitm(u64 program_id, bool whitelisted) {
+    if (program_id == 0x4200000000000010ULL) return false;  // our sysmodule
+    if (program_id < 0x0100000000000000ULL) return false;   // system process
+    if (!IsLdnEnabled()) return false;
+    return whitelisted;
+}
+
 } // namespace mock
 
 //=============================================================================
@@ -740,6 +766,62 @@ TEST(ldn_enabled_set_get_roundtrip) {
 }
 
 
+//=============================================================================
+// ShouldMitm Gate Tests ([ldn] enabled)
+//=============================================================================
+
+static constexpr u64 kGameProgramId = 0x0100152000022000ULL;
+static constexpr u64 kSysmoduleProgramId = 0x0100000000000006ULL;  // usb, not whitelisted
+
+/**
+ * @test ldn:u ShouldMitm reads the current value on every service open
+ */
+TEST(ldn_should_mitm_follows_enabled) {
+    mock::MockConfigService svc;
+
+    ASSERT_TRUE(mock::LdnShouldMitm());  // default enabled = 1
+
+    svc.SetLdnEnabled(0);
+    ASSERT_FALSE(mock::LdnShouldMitm());
+
+    svc.SetLdnEnabled(1);
+    ASSERT_TRUE(mock::LdnShouldMitm());
+}
+
+/**
+ * @test bsd:u ShouldMitm leaves a whitelisted game alone when disabled
+ */
+TEST(bsd_should_mitm_skips_game_when_disabled) {
+    mock::MockConfigService svc;
+
+    svc.SetLdnEnabled(0);
+    ASSERT_FALSE(mock::BsdShouldMitm(kGameProgramId, true));
+}
+
+/**
+ * @test bsd:u ShouldMitm behaviour is unchanged when enabled
+ */
+TEST(bsd_should_mitm_unchanged_when_enabled) {
+    mock::MockConfigService svc;
+
+    svc.SetLdnEnabled(1);
+    ASSERT_TRUE(mock::BsdShouldMitm(kGameProgramId, true));
+    ASSERT_FALSE(mock::BsdShouldMitm(kGameProgramId, false));
+}
+
+/**
+ * @test bsd:u ShouldMitm never intercepts non-game processes, in either state
+ */
+TEST(bsd_should_mitm_never_intercepts_system) {
+    mock::MockConfigService svc;
+
+    for (u32 enabled = 0; enabled <= 1; enabled++) {
+        svc.SetLdnEnabled(enabled);
+        ASSERT_FALSE(mock::BsdShouldMitm(kSysmoduleProgramId, false));
+        ASSERT_FALSE(mock::BsdShouldMitm(0x4200000000000010ULL, true));
+    }
+}
+
 /**
  * @test DebugEnabled default is false
  */
@@ -894,6 +976,12 @@ int main() {
     RUN_TEST(ldn_enabled_default_true);
     RUN_TEST(ldn_enabled_set_get_roundtrip);
     RUN_TEST(boolean_nonzero_is_true);
+
+    printf("\n--- ShouldMitm Gate Tests ---\n");
+    RUN_TEST(ldn_should_mitm_follows_enabled);
+    RUN_TEST(bsd_should_mitm_skips_game_when_disabled);
+    RUN_TEST(bsd_should_mitm_unchanged_when_enabled);
+    RUN_TEST(bsd_should_mitm_never_intercepts_system);
 
     printf("\n--- Debug Level Tests ---\n");
     RUN_TEST(debug_level_default_warning);

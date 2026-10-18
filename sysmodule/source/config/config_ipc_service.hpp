@@ -103,6 +103,19 @@ extern ams::os::SdkMutex g_config_mutex;
 void InitializeConfig();
 
 /**
+ * @brief Read the current [ldn] enabled value
+ *
+ * Called by the ldn:u and bsd:u ShouldMitm handlers when a process opens
+ * the service, so a change made from the overlay applies to the next
+ * game that starts.
+ *
+ * Thread-safe: Acquires g_config_mutex.
+ *
+ * @return true if LDN emulation is enabled
+ */
+bool IsLdnEnabled();
+
+/**
  * @brief Configuration IPC service implementation
  */
 class ConfigService {
