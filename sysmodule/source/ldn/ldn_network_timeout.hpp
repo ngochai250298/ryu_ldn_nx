@@ -9,7 +9,8 @@
  *
  * - RefreshTimeout(): Called after Scan or network disconnection
  * - DisableTimeout(): Called when entering a network (CreateNetwork, Connect)
- * - After timeout expires, the callback disconnects from server
+ * - CheckTimeout() returns true once when the timeout expires; the caller
+ *   acts on that outside any lock (the optional callback runs unlocked too)
  *
  * ## Ryujinx Compatibility
  *
@@ -51,7 +52,8 @@ public:
     /**
      * @brief Constructor
      * @param idle_timeout_ms Timeout duration in milliseconds
-     * @param callback Function to call when timeout expires
+     * @param callback Function to call when timeout expires (may be nullptr;
+     *                 it runs with the internal mutex released)
      */
     NetworkTimeout(uint64_t idle_timeout_ms, TimeoutCallback callback);
 
@@ -89,7 +91,7 @@ public:
      * has elapsed and the callback should be invoked.
      *
      * @param current_time_ms Current time in milliseconds
-     * @return true if timeout expired and callback was invoked
+     * @return true exactly once per expiry (callback, if any, already run)
      */
     bool CheckTimeout(uint64_t current_time_ms);
 

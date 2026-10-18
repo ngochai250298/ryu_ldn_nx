@@ -49,9 +49,22 @@ public:
      * @brief Constructor
      *
      * @param program_id Program ID of the client process (used to replace LocalCommunicationId=-1)
+     * @param owner_pid Process that opened ldn:u (the LdnPid this session owns)
+     * @param stack_slot Receive-thread stack from ClaimReceiveStack(); the
+     *        instance releases it after joining the thread
      */
     /// @gdb{tag="LDN:LIFECYCLE", msg="Communication service created"}
-    explicit ICommunicationService(ncm::ProgramId program_id);
+    ICommunicationService(ncm::ProgramId program_id, u64 owner_pid, int stack_slot);
+
+    /**
+     * @brief Reserve a receive-thread stack for a new instance
+     *
+     * Each live instance needs its own stack: a previous game's instance can
+     * still be shutting down when the next game opens ldn:u.
+     *
+     * @return slot index, or -1 when every stack is in use
+     */
+    static int ClaimReceiveStack();
 
     /**
      * @brief Destructor
@@ -356,6 +369,15 @@ public:
     /// @gdb{tag="LDN:OPS", msg="ClearAcceptFilter"}
     Result ClearAcceptFilter();
 
+    /**
+     * @brief SetProtocol (cmd 106, [18.0.0+])
+     *
+     * Ryujinx stubs it: accepts 1 or 3 (the only values hardware allows)
+     * and returns Success. Other values get InvalidArgument here, where
+     * Ryujinx throws.
+     */
+    Result SetProtocol(u32 protocol);
+
 private:
     /**
      * @brief Connect to RyuLdn server
@@ -435,12 +457,14 @@ private:
      * @brief Handle NetworkError packet from server
      *
      * Server reports a network error. Disables P2P on PortUnreachable
-     * and signals the error event.
+     * and signals the error event for anything else.
      *
      * @param data Packet payload
      * @param size Payload size
+     * @return false for PortUnreachable, which is informational: the server
+     *         goes on to send Connected, so it is not a reply to wait on
      */
-    void HandleNetworkErrorPacket(const uint8_t* data, size_t size);
+    bool HandleNetworkErrorPacket(const uint8_t* data, size_t size);
 
     /**
      * @brief Handle ScanReply packet from server
@@ -463,13 +487,32 @@ private:
     /// @gdb{tag="LDN:ASYNC", msg="WaitForResponse: expected_id=%u timeout_ms=%lu", args="$x1, $x2"}
     bool WaitForResponse(ryu_ldn::protocol::PacketId expected_id, uint64_t timeout_ms);
 
+    /**
+     * @brief Forget replies to earlier requests before sending a new one
+     *
+     * Resets m_last_response_id and the response/error events so that
+     * WaitForResponse only accepts a reply that arrives after this call.
+     */
+    void PrepareForResponse();
+
+    /**
+     * @brief Leave the current room (Ryujinx DisconnectNetwork)
+     *
+     * If we are in a network, tells the server with PacketId::Disconnect
+     * (the TCP link stays up) and drops the local network state. Re-arms the
+     * inactivity timeout. Must be called without m_shared_mutex held.
+     */
+    void LeaveNetwork();
+
 private:
     LdnStateMachine m_state_machine;        ///< Thread-safe state machine
-    u64 m_error_state;                      ///< Error state flag
     u64 m_client_process_id;                ///< Client game process ID
+    const u64 m_owner_pid;                  ///< Process that opened ldn:u; only this LdnPid is ours to clear
+    const int m_stack_slot;                 ///< Receive-thread stack slot, released in the destructor
 
     NetworkInfo m_network_info;             ///< Current network info
     DisconnectReason m_disconnect_reason;   ///< Last disconnect reason
+    DisconnectReason m_pending_reject_reason; ///< Reason from a server Reject, applied when the Disconnect follows
     u32 m_ipv4_address;                     ///< Assigned IPv4 address
     u32 m_subnet_mask;                      ///< Subnet mask
 
@@ -516,6 +559,13 @@ private:
     ryu_ldn::protocol::ExternalProxyConfig m_external_proxy_config; ///< External proxy config
     p2p::P2pProxyClient* m_p2p_client;                      ///< Connected P2P proxy client (joiner side)
     p2p::P2pProxyServer* m_p2p_server;                      ///< Hosted P2P proxy server (host side)
+    /// Guards m_p2p_client/m_p2p_server for threads other than the IPC
+    /// thread that creates the server: BSD senders, the receive thread and
+    /// the connect worker. Teardown detaches a pointer under it and stops
+    /// or deletes outside it (P2pProxyServer::Stop joins session threads).
+    os::SdkMutex m_p2p_mutex;
+    /// Serialises create/join of m_p2p_connect_thread (receive thread vs IPC).
+    os::SdkMutex m_p2p_worker_mutex;
 
     // Async ExternalProxy connect thread — mirrors Ryujinx's architecture
     // where HandleExternalProxy runs on the receive thread (NetCoreServer
@@ -572,13 +622,6 @@ private:
     u16 m_expected_scene_id;                                ///< Expected sceneId from game's Scan filter (Ryujinx may use 0)
 
     /**
-     * @brief Static callback for inactivity timeout
-     *
-     * Called when the timeout expires. Disconnects from server.
-     */
-    static void OnInactivityTimeout();
-
-    /**
      * @brief Find our local node ID in the network info
      *
      * Searches through the nodes array to find the node matching our
@@ -620,6 +663,14 @@ private:
      * @brief Disconnect from P2P proxy if connected
      */
     void DisconnectP2pProxy();
+
+    /**
+     * @brief Join the connect worker, then stop the P2P server and client
+     *
+     * Runs before DisconnectFromServer on every teardown path so no P2P
+     * thread is left using this service or its sockets.
+     */
+    void StopP2p();
 
     /**
      * @brief Start P2P proxy server for hosting

@@ -135,6 +135,16 @@ public:
     /// @gdb{tag="LDN:STATE", msg="IsLdnPid: pid=%lu", args="$x1"}
     bool IsLdnPid(u64 pid) const;
 
+    /**
+     * @brief Clear the LDN PID and active game, but only if they are @p pid
+     *
+     * A session being torn down late must not clear what a newer game set.
+     *
+     * @return true when no other process holds the LDN PID afterwards, i.e.
+     *         the global proxy/BSD state is safe to reset
+     */
+    bool ReleaseGame(u64 pid);
+
     // =========================================================================
     // LDN Game Whitelist (for BSD MITM)
     // =========================================================================
@@ -309,6 +319,8 @@ private:
     SharedState() = default;
     SharedState(const SharedState&) = delete;
     SharedState& operator=(const SharedState&) = delete;
+
+    void SetGameActiveLocked(bool active, u64 process_id);
 
     mutable ams::os::SdkMutex m_mutex{};
     bool m_game_active = false;

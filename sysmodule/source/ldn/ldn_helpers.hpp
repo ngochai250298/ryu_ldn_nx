@@ -1,0 +1,136 @@
+/**
+ * @file ldn_helpers.hpp
+ * @brief Pure decision helpers used by ICommunicationService
+ *
+ * No Switch headers: the host tests in tests/ldn_service_tests.cpp include
+ * this file and exercise the same code the sysmodule runs. Enum-typed
+ * helpers are templates so this header needs nothing from ldn_types.hpp.
+ *
+ * @copyright Copyright (c) 2026 ryu_ldn_nx contributors
+ * @license GPL-2.0-or-later
+ */
+
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
+namespace ams::mitm::ldn::helpers {
+
+/**
+ * @brief nn::ldn result descriptions (module 203, shown as 2203-NNNN)
+ *
+ * Values from Ryujinx Services/Ldn/ResultCode.cs; InvalidState (32) is also
+ * what ldn_mitm returns for state errors.
+ */
+namespace desc {
+    constexpr uint32_t Module             = 203;
+    constexpr uint32_t DeviceNotAvailable = 16;
+    constexpr uint32_t DeviceDisabled     = 22;
+    constexpr uint32_t InvalidState       = 32;
+    constexpr uint32_t NodeNotFound       = 48;
+    constexpr uint32_t ConnectFailure     = 64;
+    constexpr uint32_t ConnectNotFound    = 65;
+    constexpr uint32_t ConnectTimeout     = 66;
+    constexpr uint32_t ConnectRejected    = 67;
+    constexpr uint32_t InvalidArgument    = 96;
+    constexpr uint32_t InvalidObject      = 97;
+    constexpr uint32_t VersionTooLow      = 113;
+    constexpr uint32_t VersionTooHigh     = 114;
+    constexpr uint32_t TooManyPlayers     = 144;
+}
+
+/**
+ * @brief Result description for a failed Connect/ConnectPrivate
+ *
+ * Ryujinx LdnMasterProxyClient.ConnectCommon + Station.NetworkErrorToResult.
+ * @p wire_error is the server's NetworkError as sent on the wire
+ * (LdnServer Network/Types/NetworkErrorMessage.cs: None=0, PortUnreachable,
+ * TooManyPlayers, VersionTooLow, VersionTooHigh, ConnectFailure,
+ * ConnectNotFound, ConnectTimeout, ConnectRejected, RejectFailed,
+ * BannedByServer=127, Unknown=-1). With no error the request timed out.
+ */
+constexpr uint32_t ConnectFailureDescription(int32_t wire_error) {
+    switch (wire_error) {
+        case 0: return desc::ConnectTimeout;   // no error reported: the wait timed out
+        case 2: return desc::TooManyPlayers;
+        case 3: return desc::VersionTooLow;
+        case 4: return desc::VersionTooHigh;
+        case 5: return desc::ConnectFailure;
+        case 6: return desc::ConnectNotFound;
+        case 7: return desc::ConnectTimeout;
+        case 8: return desc::ConnectRejected;
+        default: return desc::DeviceNotAvailable;
+    }
+}
+
+/**
+ * @brief Disconnect reason to report when the server drops us from a room
+ *
+ * Ryujinx: the reason from a preceding Reject wins; otherwise
+ * DisconnectReasonOrDefault(DestroyedBySystem) for an access point and
+ * DisconnectReasonOrDefault(DestroyedByUser) for a station.
+ */
+template <typename Reason>
+constexpr Reason ServerDisconnectReason(Reason pending_reject, bool is_host) {
+    if (pending_reject != Reason::None) {
+        return pending_reject;
+    }
+    return is_host ? Reason::DestroyedBySystem : Reason::DestroyedByUser;
+}
+
+/**
+ * @brief Fixed set of thread stacks handed out one per live owner
+ *
+ * Lives in static storage. Claim() is lock-free and safe from any IPC
+ * thread; a slot stays owned until Release(), which the owner calls only
+ * after its thread has been joined.
+ */
+template <size_t Slots, size_t Size, size_t Align>
+class StackPool {
+public:
+    static constexpr size_t StackSize = Size;
+
+    /// @return a free slot index, or -1 when every slot is in use
+    int Claim() {
+        for (size_t i = 0; i < Slots; i++) {
+            bool expected = false;
+            if (m_in_use[i].compare_exchange_strong(expected, true)) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    void Release(int slot) { m_in_use[slot].store(false); }
+
+    void* Stack(int slot) { return m_stacks[slot]; }
+
+private:
+    alignas(Align) uint8_t m_stacks[Slots][Size];
+    std::atomic<bool> m_in_use[Slots] = {};
+};
+
+/**
+ * @brief Clamp the counts in a NetworkInfo taken from the wire
+ *
+ * The game copies advertiseDataSize bytes and walks nodeCount nodes; a bad
+ * server value would make it overread its own buffer.
+ */
+template <typename Info>
+void ClampNetworkInfo(Info& info) {
+    constexpr size_t kAdvertiseMax = sizeof(info.ldn.advertiseData);
+    constexpr size_t kNodesMax = sizeof(info.ldn.nodes) / sizeof(info.ldn.nodes[0]);
+    if (info.ldn.advertiseDataSize > kAdvertiseMax) {
+        info.ldn.advertiseDataSize = kAdvertiseMax;
+    }
+    if (info.ldn.nodeCountMax > kNodesMax) {
+        info.ldn.nodeCountMax = kNodesMax;
+    }
+    if (info.ldn.nodeCount > info.ldn.nodeCountMax) {
+        info.ldn.nodeCount = info.ldn.nodeCountMax;
+    }
+}
+
+} // namespace ams::mitm::ldn::helpers
