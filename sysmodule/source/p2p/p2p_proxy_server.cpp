@@ -574,9 +574,11 @@ void P2pProxyServer::Stop() {
         // Closing the socket will cause accept() to return with an error,
         // allowing the thread to check m_running and exit cleanly.
 
+        // Shut down only: the accept thread still polls m_listen_fd, and a
+        // closed fd number can be reused by another socket. It is closed
+        // after the thread is joined below.
         if (m_listen_fd >= 0) {
-            close(m_listen_fd);
-            m_listen_fd = -1;
+            shutdown(m_listen_fd, SHUT_RDWR);
         }
 
         // =====================================================================
@@ -619,6 +621,13 @@ void P2pProxyServer::Stop() {
     os::WaitThread(&m_accept_thread);
     os::DestroyThread(&m_accept_thread);
     g_p2p_accept_stack_in_use.clear();
+    {
+        std::scoped_lock lock(m_mutex);
+        if (m_listen_fd >= 0) {
+            close(m_listen_fd);
+            m_listen_fd = -1;
+        }
+    }
 
     // Every session is now in m_zombie_sessions. Join all of them so no
     // recv thread outlives the server object, then free them and their
