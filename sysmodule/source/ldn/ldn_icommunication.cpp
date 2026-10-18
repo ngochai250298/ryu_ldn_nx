@@ -1709,6 +1709,58 @@ void ICommunicationService::HandleServerPacket(ryu_ldn::protocol::PacketId id, c
     LOG_VERBOSE("Received packet from server: type=%u, size=%zu",
                 static_cast<unsigned>(id), size);
 
+    // P2P packets take m_p2p_mutex / m_p2p_worker_mutex, whose holders do
+    // network I/O (P2P sends, the master link) or join threads. They touch
+    // nothing m_shared_mutex guards and are not responses, so handle them
+    // before taking it: IPC readers such as GetNetworkInfo must not wait
+    // behind P2P I/O.
+    switch (id) {
+        case ryu_ldn::protocol::PacketId::ExternalProxy: {
+            HandleExternalProxyPacket(data, size);
+            return;
+        }
+
+        case ryu_ldn::protocol::PacketId::ExternalProxyToken: {
+            // Server sends token for expected P2P joiner (like Ryujinx HandleExternalProxyToken)
+            // This is sent to the HOST when a joiner is about to connect via P2P
+            if (size >= sizeof(ryu_ldn::protocol::ExternalProxyToken)) {
+                const auto* token = reinterpret_cast<const ryu_ldn::protocol::ExternalProxyToken*>(data);
+                LOG_INFO("Received ExternalProxyToken: virtual_ip=0x%08X",
+                         token->virtual_ip);
+
+                // Add token to P2P server's waiting list for authentication
+                HandleExternalProxyToken(*token);
+            }
+            return;
+        }
+
+        case ryu_ldn::protocol::PacketId::ExternalProxyState: {
+            // Master tells the host that a joiner's connection state changed.
+            // Mirrors Ryujinx P2pProxyServer.HandleStateChange — when
+            // Connected=false we have to drop the matching waiting token
+            // (so the slot doesn't stay reserved for someone who never
+            // showed up) and disconnect any session already authenticated
+            // under that vIP. Without this handler, a joiner that fails
+            // its TCP-side auth on us leaves the master holding a stale
+            // _players entry for them while we keep the token forever,
+            // and the next CreateNetwork retry can't reuse the slot.
+            if (size >= sizeof(ryu_ldn::protocol::ExternalProxyConnectionState)) {
+                const auto* state = reinterpret_cast<const ryu_ldn::protocol::ExternalProxyConnectionState*>(data);
+                LOG_INFO("Received ExternalProxyState: vIP=0x%08X connected=%u",
+                         state->ip_address, static_cast<unsigned>(state->connected));
+                std::scoped_lock p2p_lock(m_p2p_mutex);
+                if (m_p2p_server != nullptr) {
+                    m_p2p_server->HandleExternalProxyStateChange(state->ip_address,
+                                                                 state->connected != 0);
+                }
+            }
+            return;
+        }
+
+        default:
+            break;
+    }
+
     // Lock shared state for the entire handler — we write m_network_info,
     // m_network_connected, m_scan_results, m_last_response_id, etc.
     // Event Signal() calls are safe outside this lock (kernel handles
@@ -1846,48 +1898,6 @@ void ICommunicationService::HandleServerPacket(ryu_ldn::protocol::PacketId id, c
                 auto& socket_manager = mitm::bsd::ProxySocketManager::GetInstance();
                 socket_manager.SetLocalIp(config->proxy_ip);
                 LOG_INFO("ProxySocketManager: local IP set to 0x%08X", config->proxy_ip);
-            }
-            break;
-        }
-
-        case ryu_ldn::protocol::PacketId::ExternalProxy: {
-            HandleExternalProxyPacket(data, size);
-            break;
-        }
-
-        case ryu_ldn::protocol::PacketId::ExternalProxyToken: {
-            // Server sends token for expected P2P joiner (like Ryujinx HandleExternalProxyToken)
-            // This is sent to the HOST when a joiner is about to connect via P2P
-            if (size >= sizeof(ryu_ldn::protocol::ExternalProxyToken)) {
-                const auto* token = reinterpret_cast<const ryu_ldn::protocol::ExternalProxyToken*>(data);
-                LOG_INFO("Received ExternalProxyToken: virtual_ip=0x%08X",
-                         token->virtual_ip);
-
-                // Add token to P2P server's waiting list for authentication
-                HandleExternalProxyToken(*token);
-            }
-            break;
-        }
-
-        case ryu_ldn::protocol::PacketId::ExternalProxyState: {
-            // Master tells the host that a joiner's connection state changed.
-            // Mirrors Ryujinx P2pProxyServer.HandleStateChange — when
-            // Connected=false we have to drop the matching waiting token
-            // (so the slot doesn't stay reserved for someone who never
-            // showed up) and disconnect any session already authenticated
-            // under that vIP. Without this handler, a joiner that fails
-            // its TCP-side auth on us leaves the master holding a stale
-            // _players entry for them while we keep the token forever,
-            // and the next CreateNetwork retry can't reuse the slot.
-            if (size >= sizeof(ryu_ldn::protocol::ExternalProxyConnectionState)) {
-                const auto* state = reinterpret_cast<const ryu_ldn::protocol::ExternalProxyConnectionState*>(data);
-                LOG_INFO("Received ExternalProxyState: vIP=0x%08X connected=%u",
-                         state->ip_address, static_cast<unsigned>(state->connected));
-                std::scoped_lock p2p_lock(m_p2p_mutex);
-                if (m_p2p_server != nullptr) {
-                    m_p2p_server->HandleExternalProxyStateChange(state->ip_address,
-                                                                 state->connected != 0);
-                }
             }
             break;
         }
