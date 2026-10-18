@@ -74,6 +74,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <atomic>
 #include <cstring>
 
 namespace ams::mitm::p2p {
@@ -112,6 +113,10 @@ void ClientRecvThreadEntry(void* arg) {
 constexpr size_t P2P_CLIENT_STACK_SIZE = 0x4000;
 alignas(os::ThreadStackAlignment) constinit u8
     g_p2p_client_recv_thread_stack[P2P_CLIENT_STACK_SIZE];
+// Set while a recv thread runs on the stack above, so a second client
+// (e.g. a new one created before the old one is destroyed) fails to connect
+// instead of running two threads on one stack.
+constinit std::atomic_flag g_p2p_client_stack_in_use = ATOMIC_FLAG_INIT;
 
 // =============================================================================
 // Constructor / Destructor
@@ -132,6 +137,7 @@ P2pProxyClient::P2pProxyClient(ProxyPacketCallback packet_callback)
     , m_ready(false)
     , m_proxy_config{}
     , m_recv_thread_running(false)
+    , m_recv_thread_created(false)
     , m_packet_callback(packet_callback) {
 
     LOG_VERBOSE("P2pProxyClient created");
@@ -195,6 +201,12 @@ bool P2pProxyClient::Connect(const char* address, uint16_t port) {
  * This overload is used when we have the IP address from ExternalProxyConfig.
  */
 bool P2pProxyClient::Connect(const uint8_t* ip_bytes, size_t ip_len, uint16_t port) {
+    // If the host dropped us, the recv thread has exited but its thread
+    // object and socket are still held; release them before reconnecting.
+    if (!IsConnected()) {
+        Disconnect();
+    }
+
     std::scoped_lock lock(m_mutex);
 
     if (m_connected) {
@@ -318,13 +330,8 @@ bool P2pProxyClient::Connect(const uint8_t* ip_bytes, size_t ip_len, uint16_t po
     // the moment we actually managed to get past `connect()` (before the
     // private_ip htonl fix the connect always timed out, so this code
     // path was never reached).
-    Result rc = os::CreateThread(&m_recv_thread, ClientRecvThreadEntry, this,
-                                  g_p2p_client_recv_thread_stack,
-                                  P2P_CLIENT_STACK_SIZE,
-                                  /* priority */ 7);
-
-    if (R_FAILED(rc)) {
-        LOG_ERROR("P2P client: failed to create recv thread (rc=0x%X)", rc.GetValue());
+    if (g_p2p_client_stack_in_use.test_and_set()) {
+        LOG_ERROR("P2P client: another client's recv thread still owns the stack");
         close(m_socket_fd);
         m_socket_fd = -1;
         m_connected = false;
@@ -332,6 +339,22 @@ bool P2pProxyClient::Connect(const uint8_t* ip_bytes, size_t ip_len, uint16_t po
         return false;
     }
 
+    Result rc = os::CreateThread(&m_recv_thread, ClientRecvThreadEntry, this,
+                                  g_p2p_client_recv_thread_stack,
+                                  P2P_CLIENT_STACK_SIZE,
+                                  /* priority */ 7);
+
+    if (R_FAILED(rc)) {
+        LOG_ERROR("P2P client: failed to create recv thread (rc=0x%X)", rc.GetValue());
+        g_p2p_client_stack_in_use.clear();
+        close(m_socket_fd);
+        m_socket_fd = -1;
+        m_connected = false;
+        m_recv_thread_running = false;
+        return false;
+    }
+
+    m_recv_thread_created = true;
     os::StartThread(&m_recv_thread);
 
     LOG_INFO("P2P client: connected to %s:%u", ip_str, port);
@@ -347,7 +370,7 @@ bool P2pProxyClient::Connect(const uint8_t* ip_bytes, size_t ip_len, uint16_t po
 void P2pProxyClient::Disconnect() {
     std::scoped_lock lock(m_mutex);
 
-    if (!m_connected && m_socket_fd < 0) {
+    if (!m_recv_thread_created && m_socket_fd < 0) {
         return;
     }
 
@@ -356,21 +379,30 @@ void P2pProxyClient::Disconnect() {
     // Stop receive thread
     m_recv_thread_running = false;
 
-    // Close socket to unblock recv()
+    // Shut down (not close) to unblock recv(): the recv thread still reads
+    // m_socket_fd, and a closed fd number can be reused by another socket.
     if (m_socket_fd >= 0) {
         shutdown(m_socket_fd, SHUT_RDWR);
-        close(m_socket_fd);
-        m_socket_fd = -1;
     }
 
-    // Wait for receive thread to finish
-    if (m_connected) {
-        // We need to release the lock temporarily to avoid deadlock
-        // since the recv thread might try to acquire it
+    // Join even when the thread already exited on its own (host closed the
+    // connection), so its thread object and the shared static stack are
+    // released before the next Connect().
+    if (m_recv_thread_created) {
+        // Cleared before unlocking so a concurrent Disconnect() can't join
+        // the same thread twice.
+        m_recv_thread_created = false;
+        // Release the lock: the recv thread takes it on its way out.
         m_mutex.Unlock();
         os::WaitThread(&m_recv_thread);
         os::DestroyThread(&m_recv_thread);
+        g_p2p_client_stack_in_use.clear();
         m_mutex.Lock();
+    }
+
+    if (m_socket_fd >= 0) {
+        close(m_socket_fd);
+        m_socket_fd = -1;
     }
 
     m_connected = false;

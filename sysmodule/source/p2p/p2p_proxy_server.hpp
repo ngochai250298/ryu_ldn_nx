@@ -112,6 +112,9 @@ public:
     /// 1 s token wait in TryRegisterUser; joiners give up after 4 s
     /// (P2pProxyClient::FAILURE_TIMEOUT_MS) anyway.
     static constexpr uint64_t AUTH_TIMEOUT_MS = 5000;
+    /// Cap on one blocking send() to a session. Sends run under m_mutex,
+    /// so a peer that stops reading must not stall routing for everyone.
+    static constexpr int SEND_TIMEOUT_MS = 500;
 
     // =========================================================================
     // Lifecycle
@@ -423,7 +426,7 @@ private:
     // Atomic so the accept thread sees the Stop()-side flip without going
     // through m_mutex (we don't want to take m_mutex on every poll cycle).
     std::atomic<bool> m_running;
-    bool m_disposed;
+    std::atomic<bool> m_disposed;
 
     // Accept thread (stack lives in BSS — see g_p2p_accept_thread_stack in
     // p2p_proxy_server.cpp). Inlining the stack inside the class with
@@ -435,7 +438,7 @@ private:
 
     // Lease renewal thread (stack: g_p2p_lease_thread_stack in BSS)
     os::ThreadType m_lease_thread;
-    bool m_lease_thread_running;
+    std::atomic<bool> m_lease_thread_running;
 
     // Authenticated sessions
     std::unique_ptr<P2pProxySession> m_sessions[MAX_PLAYERS];

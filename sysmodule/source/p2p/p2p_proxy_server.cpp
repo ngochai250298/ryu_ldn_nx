@@ -188,6 +188,10 @@ namespace ams::mitm::p2p {
 // Single-host model means we only ever need one set of stacks.
 alignas(os::ThreadStackAlignment) constinit u8 g_p2p_accept_thread_stack[0x4000];
 alignas(os::ThreadStackAlignment) constinit u8 g_p2p_lease_thread_stack[0x2000];
+// Set while a thread runs on the matching stack, so a second server
+// instance fails cleanly instead of sharing a live stack.
+constinit std::atomic_flag g_p2p_accept_stack_in_use = ATOMIC_FLAG_INIT;
+constinit std::atomic_flag g_p2p_lease_stack_in_use = ATOMIC_FLAG_INIT;
 
 // =============================================================================
 // Session Recv Thread Stack Pool
@@ -504,16 +508,31 @@ bool P2pProxyServer::Start(uint16_t port) {
     // R_ABORT_UNLESS panicked the process with DABRT 0x101 the first time
     // a host called CreateNetwork.
 
+    if (g_p2p_accept_stack_in_use.test_and_set()) {
+        LOG_ERROR("P2P server: another server's accept thread still owns the stack");
+        close(m_listen_fd);
+        m_listen_fd = -1;
+        return false;
+    }
+
     m_running = true;
 
-    R_ABORT_UNLESS(os::CreateThread(
+    Result rc = os::CreateThread(
         &m_accept_thread,
         AcceptThreadEntry,                // Entry function
         this,                              // Argument (this pointer)
         g_p2p_accept_thread_stack,         // Static, page-aligned stack (BSS)
         sizeof(g_p2p_accept_thread_stack), // Stack size (16KB)
         5                                  // High user-mode priority
-    ));
+    );
+    if (R_FAILED(rc)) {
+        LOG_ERROR("P2P server: failed to create accept thread (rc=0x%X)", rc.GetValue());
+        m_running = false;
+        g_p2p_accept_stack_in_use.clear();
+        close(m_listen_fd);
+        m_listen_fd = -1;
+        return false;
+    }
 
     os::SetThreadNamePointer(&m_accept_thread, "p2p_accept");
     os::StartThread(&m_accept_thread);
@@ -599,6 +618,7 @@ void P2pProxyServer::Stop() {
 
     os::WaitThread(&m_accept_thread);
     os::DestroyThread(&m_accept_thread);
+    g_p2p_accept_stack_in_use.clear();
 
     // Every session is now in m_zombie_sessions. Join all of them so no
     // recv thread outlives the server object, then free them and their
@@ -746,6 +766,7 @@ void P2pProxyServer::ReleaseNatPunch() {
         // Thread exits within ~ChunkMs (=250 ms) of seeing the flag flip.
         os::WaitThread(&m_lease_thread);
         os::DestroyThread(&m_lease_thread);
+        g_p2p_lease_stack_in_use.clear();
         LOG_INFO("ReleaseNatPunch: lease thread joined");
     }
 
@@ -783,16 +804,25 @@ void P2pProxyServer::StartLeaseRenewal() {
         return;  // Already running
     }
 
-    m_lease_thread_running = true;
+    if (g_p2p_lease_stack_in_use.test_and_set()) {
+        LOG_WARN("P2P server: lease stack in use, skipping UPnP lease renewal");
+        return;
+    }
 
-    R_ABORT_UNLESS(os::CreateThread(
+    Result rc = os::CreateThread(
         &m_lease_thread,
         LeaseThreadEntry,
         this,
         g_p2p_lease_thread_stack,         // Static, page-aligned stack (BSS)
         sizeof(g_p2p_lease_thread_stack),
         os::LowestThreadPriority           // Low priority - not time-critical
-    ));
+    );
+    if (R_FAILED(rc)) {
+        LOG_WARN("P2P server: failed to create lease thread (rc=0x%X)", rc.GetValue());
+        g_p2p_lease_stack_in_use.clear();
+        return;
+    }
+    m_lease_thread_running = true;
 
     os::SetThreadNamePointer(&m_lease_thread, "p2p_lease");
     os::StartThread(&m_lease_thread);
@@ -1361,6 +1391,14 @@ void P2pProxyServer::AcceptLoop() {
             LOG_WARN("Failed to set TCP_NODELAY on client socket");
         }
 
+        // Bound how long one send() can block (it runs under m_mutex).
+        struct timeval send_timeout;
+        send_timeout.tv_sec = SEND_TIMEOUT_MS / 1000;
+        send_timeout.tv_usec = (SEND_TIMEOUT_MS % 1000) * 1000;
+        if (setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout)) < 0) {
+            LOG_WARN("Failed to set SO_SNDTIMEO on client socket");
+        }
+
         // =====================================================================
         // Check Session Limits
         // =====================================================================
@@ -1486,10 +1524,9 @@ void P2pProxyServer::RouteMessage(P2pProxySession* sender,
 
     bool is_broadcast = (dest_ip == m_broadcast_address);
 
-    LOG_INFO("RouteMessage: sender_vIP=0x%08X src=0x%08X dst=0x%08X (orig=0x%08X) bcast=%d, scanning sessions",
+    LOG_VERBOSE("RouteMessage: sender_vIP=0x%08X src=0x%08X dst=0x%08X (orig=0x%08X) bcast=%d, scanning sessions",
              sender->GetVirtualIpAddress(), info.source_ipv4, dest_ip, info.dest_ipv4,
              static_cast<int>(is_broadcast));
-    ryu_ldn::debug::g_logger.flush();
 
     // =========================================================================
     // Route to Destination(s)
@@ -1499,11 +1536,10 @@ void P2pProxyServer::RouteMessage(P2pProxySession* sender,
         // Send to all authenticated players
         for (int i = 0; i < MAX_PLAYERS; i++) {
             P2pProxySession* s = m_sessions[i].get();
-            LOG_INFO("RouteMessage: slot %d -> %p%s",
+            LOG_VERBOSE("RouteMessage: slot %d -> %p%s",
                      i, static_cast<void*>(s),
                      s == nullptr ? " (null)" :
                      (s->IsAuthenticated() ? " (auth)" : " (unauth)"));
-            ryu_ldn::debug::g_logger.flush();
             if (s != nullptr && s->IsAuthenticated()) {
                 send_func(s);
             }
@@ -1514,8 +1550,7 @@ void P2pProxyServer::RouteMessage(P2pProxySession* sender,
             P2pProxySession* s = m_sessions[i].get();
             if (s != nullptr && s->IsAuthenticated() &&
                 s->GetVirtualIpAddress() == dest_ip) {
-                LOG_INFO("RouteMessage: unicast match slot %d (vIP 0x%08X)", i, dest_ip);
-                ryu_ldn::debug::g_logger.flush();
+                LOG_VERBOSE("RouteMessage: unicast match slot %d (vIP 0x%08X)", i, dest_ip);
                 send_func(s);
                 break;  // Found the target
             }
@@ -1547,23 +1582,21 @@ static inline bool HostShouldReceive(uint32_t dest_ip,
 void P2pProxyServer::HandleProxyData(P2pProxySession* sender,
                                       ryu_ldn::protocol::ProxyDataHeader& header,
                                       const uint8_t* data, size_t data_len) {
-    LOG_INFO("HandleProxyData ENTRY: sender_vIP=0x%08X, src=0x%08X:%u dst=0x%08X:%u proto=%u len=%zu",
+    LOG_VERBOSE("HandleProxyData ENTRY: sender_vIP=0x%08X, src=0x%08X:%u dst=0x%08X:%u proto=%u len=%zu",
              sender->GetVirtualIpAddress(),
              header.info.source_ipv4, header.info.source_port,
              header.info.dest_ipv4,   header.info.dest_port,
              static_cast<unsigned>(header.info.protocol), data_len);
-    ryu_ldn::debug::g_logger.flush();
 
     // RouteMessage holds m_mutex while it calls the lambda, which is what
     // makes m_send_buffer safe to use here. Encode once, on the first target,
     // after RouteMessage has canonicalised header.info.
     size_t len = 0;
     RouteMessage(sender, header.info, [&](P2pProxySession* target) {
-        LOG_INFO("HandleProxyData ROUTE: sender_vIP=0x%08X -> target_vIP=0x%08X (target=%p)",
+        LOG_VERBOSE("HandleProxyData ROUTE: sender_vIP=0x%08X -> target_vIP=0x%08X (target=%p)",
                  sender->GetVirtualIpAddress(),
                  target ? target->GetVirtualIpAddress() : 0,
                  static_cast<void*>(target));
-        ryu_ldn::debug::g_logger.flush();
         if (len == 0 &&
             ryu_ldn::protocol::encode_with_data(m_send_buffer, sizeof(m_send_buffer),
                                                 ryu_ldn::protocol::PacketId::ProxyData,
@@ -1598,8 +1631,7 @@ void P2pProxyServer::HandleProxyData(P2pProxySession* sender,
                 data, data_len, host_user_data);
     }
 
-    LOG_INFO("HandleProxyData EXIT: sender_vIP=0x%08X", sender->GetVirtualIpAddress());
-    ryu_ldn::debug::g_logger.flush();
+    LOG_VERBOSE("HandleProxyData EXIT: sender_vIP=0x%08X", sender->GetVirtualIpAddress());
 }
 
 /**
@@ -1937,12 +1969,16 @@ bool P2pProxySession::Send(const void* data, size_t size) {
     if (sent != static_cast<ssize_t>(size)) {
         LOG_WARN("P2pProxySession::Send short/failed: fd=%d size=%zu sent=%zd errno=%d",
                  m_socket_fd, size, sent, errno);
+        // A short or timed-out send leaves the stream mid-frame, so the
+        // session is unusable. Shut it down; its own recv thread then wakes
+        // and retires it (callers may hold the server mutex, so no
+        // Disconnect() here).
+        shutdown(m_socket_fd, SHUT_RDWR);
         return false;
     }
 
-    LOG_INFO("P2pProxySession::Send ok: fd=%d virtual_ip=0x%08X size=%zu",
+    LOG_VERBOSE("P2pProxySession::Send ok: fd=%d virtual_ip=0x%08X size=%zu",
              m_socket_fd, m_virtual_ip, size);
-    ryu_ldn::debug::g_logger.flush();
     return true;
 }
 
@@ -2008,10 +2044,9 @@ void P2pProxySession::ReceiveLoop() {
             break;
         }
 
-        LOG_INFO("P2pProxySession: recv %zd bytes (after %llu ms), dispatching",
+        LOG_VERBOSE("P2pProxySession: recv %zd bytes (after %llu ms), dispatching",
                  received,
                  static_cast<unsigned long long>(now_ms - last_recv_ms));
-        ryu_ldn::debug::g_logger.flush();
         last_recv_ms = now_ms;
         // Process received data
         ProcessData(static_cast<size_t>(received));

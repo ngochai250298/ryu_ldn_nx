@@ -47,6 +47,8 @@
 #include "../protocol/ryu_protocol.hpp"
 #include "p2p_frame.hpp"
 
+#include <atomic>
+
 namespace ams::mitm::p2p {
 
 /**
@@ -297,7 +299,7 @@ private:
     // Socket
     int m_socket_fd;
     bool m_connected;
-    bool m_disposed;
+    std::atomic<bool> m_disposed;
 
     // Authentication state
     bool m_ready;
@@ -314,7 +316,8 @@ private:
     // moment the server told us about the external proxy. Same root cause
     // as the P2pProxyServer/P2pProxySession fix.
     os::ThreadType m_recv_thread;
-    bool m_recv_thread_running;
+    std::atomic<bool> m_recv_thread_running;
+    bool m_recv_thread_created;  ///< m_recv_thread needs WaitThread/DestroyThread
 
     // TCP stream reassembly, one frame at most (was a 64 KB recv buffer
     // that dropped any frame split across two recv() calls)
