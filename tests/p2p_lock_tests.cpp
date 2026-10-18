@@ -19,9 +19,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 #include "p2p/p2p_proxy_client.hpp"
@@ -147,6 +149,67 @@ static bool test_reap_joins_before_delete() {
     return true;
 }
 
+// Master link stand-in that stalls until the test releases it
+static std::mutex g_master_mutex;
+static std::condition_variable g_master_cv;
+static bool g_master_entered = false;
+static bool g_master_release = false;
+
+static void StalledMasterSend(const void*, size_t, void*) {
+    std::unique_lock lk(g_master_mutex);
+    g_master_entered = true;
+    g_master_cv.notify_all();
+    g_master_cv.wait_for(lk, 30s, [] { return g_master_release; });
+}
+
+/**
+ * When an authenticated session drops, the server tells the master. That
+ * send used to run under the server mutex, so a stalled master link froze
+ * the accept loop, host broadcasts and token handling with it.
+ */
+static bool test_master_notify_runs_outside_server_mutex() {
+    P2pProxyServer server(StalledMasterSend, nullptr);
+    if (!server.Start()) {
+        printf("FAIL\n    server start\n");
+        return false;
+    }
+
+    P2pProxyClient client;
+    if (!AuthenticateJoiner(server, client, 0x0A720002)) {
+        printf("FAIL\n    joiner did not authenticate\n");
+        return false;
+    }
+
+    // The session's recv thread sees EOF and notifies the master, which stalls
+    client.Disconnect();
+    if (!WaitFor([] { std::lock_guard lk(g_master_mutex); return g_master_entered; }, 5000ms)) {
+        printf("FAIL\n    master was never notified\n");
+        return false;
+    }
+
+    // The server mutex must be free while the master send is stuck
+    std::atomic<bool> added{false};
+    std::thread t([&] {
+        ryu_ldn::protocol::ExternalProxyToken next{};
+        next.virtual_ip = 0x0A720003;
+        server.AddWaitingToken(next);
+        added = true;
+    });
+    const bool ok = WaitFor([&] { return added.load(); }, 2000ms);
+
+    {
+        std::lock_guard lk(g_master_mutex);
+        g_master_release = true;
+    }
+    g_master_cv.notify_all();
+    t.join();
+    server.Stop();
+    if (!ok) {
+        printf("FAIL\n    server mutex held across the master send\n");
+    }
+    return ok;
+}
+
 int main() {
     printf("\n=== P2P Lock Tests ===\n");
     signal(SIGPIPE, SIG_IGN);
@@ -164,6 +227,8 @@ int main() {
     run("disconnect_while_send_blocked_on_stalled_host",
         test_disconnect_while_send_blocked_on_stalled_host);
     run("reap_joins_before_delete", test_reap_joins_before_delete);
+    run("master_notify_runs_outside_server_mutex",
+        test_master_notify_runs_outside_server_mutex);
 
     printf("  Results: %d/%d passed\n", passed, total);
     return passed == total ? 0 : 1;

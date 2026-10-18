@@ -392,8 +392,11 @@ private:
      * else (Stop, the auth timeout, a master state change or its own recv
      * thread), so this is a no-op for it: each session reaches the zombie
      * queue exactly once.
+     *
+     * @return The virtual IP to pass to NotifyMasterDisconnect once m_mutex
+     *         is released (the notify sends on the master link), or 0.
      */
-    void RetireSessionLocked(P2pProxySession* session, bool notify_master);
+    uint32_t RetireSessionLocked(P2pProxySession* session, bool notify_master);
 
     /**
      * @brief Notify master server of connection state change
