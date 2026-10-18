@@ -68,14 +68,17 @@ namespace {
 constexpr int32_t kEAgain = static_cast<int32_t>(rb::BsdErrno::Again);
 constexpr int32_t kEBadF = static_cast<int32_t>(rb::BsdErrno::BadF);
 
-rb::SockAddrIn LdnAddr(uint16_t port) {
+/// A sockaddr as the game passes it: port and address in network order.
+rb::SockAddrIn Addr(uint32_t ip, uint16_t port) {
     rb::SockAddrIn a{};
     a.sin_len = sizeof(a);
     a.sin_family = static_cast<uint8_t>(rb::AddressFamily::Inet);
     a.sin_port = __builtin_bswap16(port);
-    a.sin_addr = 0x0A720001;
+    a.sin_addr = __builtin_bswap32(ip);
     return a;
 }
+
+rb::SockAddrIn LdnAddr(uint16_t port) { return Addr(0x0A720001, port); }
 
 /// A bound UDP proxy socket, as Bind leaves it.
 std::unique_ptr<ProxySocket> BoundUdp() {
@@ -464,6 +467,67 @@ TEST(internet_destinations_leave_the_proxy) {
     ASSERT_TRUE(rb::IsProxyDestination(0xC0A800FF));   // legacy 192.168.0.255
     ASSERT_FALSE(rb::IsProxyDestination(0x08080808));  // 8.8.8.8
     ASSERT_FALSE(rb::IsProxyDestination(0x0A000001));  // 10.0.0.1 (LAN, not LDN)
+}
+
+// ============================================================================
+// Address byte order (sin_addr is network order on every path)
+// ============================================================================
+
+struct SentPacket { uint32_t src; uint16_t sport; uint32_t dst; uint16_t dport; };
+SentPacket g_sent{};
+bool CaptureSend(uint32_t src, uint16_t sport, uint32_t dst, uint16_t dport, rb::ProtocolType, const void*, size_t) {
+    g_sent = {src, sport, dst, dport};
+    return true;
+}
+
+TEST(explicit_ldn_bind_sends_with_its_own_ip) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    m.SetSendCallback(CaptureSend);
+    auto s = m.CreateProxySocket(20, rb::SocketType::Dgram, rb::ProtocolType::Udp);
+    s->Bind(Addr(0x0A720002, 8000));
+    ASSERT_EQ(s->SendTo("x", 1, 0, Addr(0x0A720003, 9000)), 1);
+    ASSERT_EQ(g_sent.src, 0x0A720002u);   // 10.114.0.2, not 2.0.114.10
+    ASSERT_EQ(g_sent.sport, 8000);
+    ASSERT_EQ(g_sent.dst, 0x0A720003u);
+    ASSERT_EQ(g_sent.dport, 9000);
+}
+
+TEST(socket_bound_without_ip_sends_with_session_ip) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    m.SetSendCallback(CaptureSend);
+    m.SetLocalIp(0x0A720005);
+    auto s = m.CreateProxySocket(21, rb::SocketType::Dgram, rb::ProtocolType::Udp);
+    s->Bind(Addr(0, 8001));
+    ASSERT_EQ(s->SendTo("x", 1, 0, Addr(0x0A72FFFF, 9000)), 1);
+    ASSERT_EQ(g_sent.src, 0x0A720005u);
+}
+
+TEST(explicit_ldn_bind_receives_unicast_and_broadcast) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    auto s = m.CreateProxySocket(22, rb::SocketType::Dgram, rb::ProtocolType::Udp);
+    s->Bind(Addr(0x0A720002, 8002));
+    ASSERT_TRUE(m.RouteIncomingData(0x0A720001, 1, 0x0A720002, 8002, rb::ProtocolType::Udp, "u", 1));
+    ASSERT_TRUE(m.RouteIncomingData(0x0A720001, 1, 0x0A72FFFF, 8002, rb::ProtocolType::Udp, "b", 1));
+    ASSERT_FALSE(m.RouteIncomingData(0x0A720001, 1, 0x0A720009, 8002, rb::ProtocolType::Udp, "o", 1));
+    rb::SockAddrIn from{};
+    char c;
+    ASSERT_EQ(s->RecvFrom(&c, 1, rb::MSG_FLAG_DONTWAIT, &from), 1);
+    ASSERT_EQ(c, 'u');
+    ASSERT_EQ(from.GetAddr(), 0x0A720001u);  // network order for the game
+    ASSERT_EQ(s->RecvFrom(&c, 1, rb::MSG_FLAG_DONTWAIT, nullptr), 1);
+    ASSERT_EQ(c, 'b');
+    m.Reset();
+}
+
+TEST(getsockname_returns_network_order) {
+    auto s = BoundUdp();
+    rb::SockAddrIn out{};
+    ASSERT_TRUE(R_SUCCEEDED(s->GetSockName(&out)));
+    ASSERT_EQ(out.GetAddr(), 0x0A720001u);
+    ASSERT_EQ(out.GetPort(), 12345);
 }
 
 TEST(timeval_to_nanoseconds) {

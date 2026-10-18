@@ -215,15 +215,18 @@ s32 ProxySocket::SendTo(const void* data, size_t len, s32 flags, const ryu_ldn::
     }
 
     // Send via ProxySocketManager which routes to LDN server.
-    // m_local_addr.sin_addr is stored in Ryujinx format (no bswap was applied in Bind),
-    // so read it directly. dest comes from the game in network byte order, so GetAddr()
-    // bswaps it into Ryujinx format — which is what the server expects on the wire.
-    uint32_t source_ip = m_local_addr.sin_addr;
+    // sin_addr is in network byte order everywhere; GetAddr() gives the
+    // host-order value, which is the Ryujinx wire format the server expects.
+    // A socket bound before the session had an IP sends with the current one.
+    auto& manager = ProxySocketManager::GetInstance();
+    uint32_t source_ip = m_local_addr.GetAddr();
+    if (source_ip == 0) {
+        source_ip = manager.GetLocalIp();
+    }
     uint16_t source_port = m_local_addr.GetPort();
     uint32_t dest_ip = dest.GetAddr();
     uint16_t dest_port = dest.GetPort();
 
-    auto& manager = ProxySocketManager::GetInstance();
     bool sent = manager.SendProxyData(source_ip, source_port, dest_ip, dest_port,
                                        m_protocol, data, len);
 
@@ -517,10 +520,10 @@ void ProxySocket::IncomingConnection(const ryu_ldn::protocol::ProxyConnectReques
     accepted->m_local_addr = m_local_addr;
 
     // Set remote address from request
-    // CRITICAL: Do NOT bswap32 the IP - must match Ryujinx/NetworkInfo format
+    // The request carries the Ryujinx (host-order) IP; sin_addr is network order.
     accepted->m_remote_addr.sin_family = static_cast<uint8_t>(ryu_ldn::bsd::AddressFamily::Inet);
     accepted->m_remote_addr.sin_len = sizeof(ryu_ldn::bsd::SockAddrIn);
-    accepted->m_remote_addr.sin_addr = request.info.source_ipv4;  // NO bswap32 - Ryujinx format
+    accepted->m_remote_addr.sin_addr = __builtin_bswap32(request.info.source_ipv4);
     accepted->m_remote_addr.sin_port = __builtin_bswap16(request.info.source_port);
 
     // Mark as connected

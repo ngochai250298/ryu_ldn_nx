@@ -392,7 +392,7 @@ size_t ProxySocketManager::FindAllSocketsByDestination(uint32_t dest_ip, uint16_
             continue;
         }
 
-        uint32_t local_ip = local_addr.sin_addr;
+        uint32_t local_ip = local_addr.GetAddr();  // Ryujinx format, like dest_ip
 
         if (local_ip == 0) {
             out_sockets[count++] = socket.get();

@@ -700,8 +700,8 @@ Result BsdMitmService::Bind(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd
 
     rb::SockAddrIn bind_addr = sock_addr;
     if (is_inaddr_any) {
-        // Ryujinx format, as stored by the other proxy paths.
-        bind_addr.sin_addr = manager.GetLocalIp();
+        // sin_addr is network order; the manager keeps the Ryujinx format.
+        bind_addr.sin_addr = __builtin_bswap32(manager.GetLocalIp());
     }
 
     if (bind_addr.GetPort() == 0) {
@@ -768,7 +768,7 @@ Result BsdMitmService::Connect(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32
         local_addr.sin_len = sizeof(local_addr);
         local_addr.sin_family = static_cast<u8>(rb::AddressFamily::Inet);
         local_addr.sin_port = __builtin_bswap16(ephemeral);
-        local_addr.sin_addr = manager.GetLocalIp();  // Ryujinx format
+        local_addr.sin_addr = __builtin_bswap32(manager.GetLocalIp());  // network order
 
         const s32 bind_result = ErrnoResult(proxy->Bind(local_addr));
         if (bind_result < 0) {
@@ -878,7 +878,7 @@ Result BsdMitmService::SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 
             local_addr.sin_len = sizeof(local_addr);
             local_addr.sin_family = static_cast<u8>(rb::AddressFamily::Inet);
             local_addr.sin_port = __builtin_bswap16(ephemeral);
-            local_addr.sin_addr = manager.GetLocalIp();  // Ryujinx format
+            local_addr.sin_addr = __builtin_bswap32(manager.GetLocalIp());  // network order
             const s32 bind_result = ErrnoResult(proxy->Bind(local_addr));
             if (bind_result < 0) {
                 manager.ReleasePort(ephemeral, socket_info.protocol);
