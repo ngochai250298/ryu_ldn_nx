@@ -29,6 +29,19 @@ This page covers common issues and their solutions.
 3. Restart the game
 4. Reboot your Switch
 
+### Error Code 2016-0101 to 2016-0104
+
+Searching for, creating or joining a room failed because the server connection failed. The code says why:
+
+| Code | Cause | Fix |
+|------|-------|-----|
+| 2016-0101 | Server unreachable (DNS, connection refused, timeout) | Check the network (a hotel login page?) and `host`/`port` in `config.ini` |
+| 2016-0102 | Secure connection failed (TLS) | Check the CA file, `host`, and the console clock |
+| 2016-0103 | Server refused this console | Check the console's ID and token in `config.ini` |
+| 2016-0104 | Server did not complete the LDN handshake | Server or version mismatch; check the server logs |
+
+Some games show a generic "could not connect" message instead of the code. Enable `log_to_file` and look for `Connection to server failed`.
+
 ### Nearby Unmodded Switch Can't See My Room
 
 Local Wireless is going to the server. Close the game and start it again while holding ZR to use real local wireless for that launch.

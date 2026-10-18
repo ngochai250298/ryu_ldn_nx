@@ -854,6 +854,20 @@ TEST(launch_button_skips_bsd_and_ldn_together) {
 }
 
 /**
+ * @test Relay connect failures map to distinct game-visible codes (2016-01xx)
+ */
+TEST(relay_failure_codes) {
+    using ryu_ldn::network::ClientResult;
+    using namespace ryu_ldn::ldn;
+
+    ASSERT_EQ(RelayConnectFailureDesc(ClientResult::ConnectionFailed), 101u);
+    ASSERT_EQ(RelayConnectFailureDesc(ClientResult::Timeout), 101u);
+    ASSERT_EQ(RelayConnectFailureDesc(ClientResult::TlsFailed), 102u);
+    ASSERT_EQ(RelayConnectFailureDesc(ClientResult::Rejected), 103u);
+    ASSERT_EQ(ResultDescRelayHandshake, 104u);
+}
+
+/**
  * @test bsd:u ShouldMitm never intercepts non-game processes, in either state
  */
 TEST(bsd_should_mitm_never_intercepts_system) {
@@ -1042,6 +1056,7 @@ int main() {
     RUN_TEST(bsd_should_mitm_ignores_enabled);
     RUN_TEST(launch_button_skips_bsd_and_ldn_together);
     RUN_TEST(bsd_should_mitm_never_intercepts_system);
+    RUN_TEST(relay_failure_codes);
 
     printf("\n--- Debug Level Tests ---\n");
     RUN_TEST(debug_level_default_warning);

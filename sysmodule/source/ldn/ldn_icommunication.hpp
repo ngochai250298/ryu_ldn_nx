@@ -381,7 +381,8 @@ public:
 private:
     /**
      * @brief Connect to RyuLdn server
-     * @return Result code
+     * @return Success, or 2016-0101..0104 (module 0x10) naming why the
+     *         relay connection failed (see ldn_route.hpp)
      */
     /// @gdb{tag="LDN:ASYNC", msg="ConnectToServer: entering"}
     Result ConnectToServer();
