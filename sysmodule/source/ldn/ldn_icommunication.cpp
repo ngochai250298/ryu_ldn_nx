@@ -86,12 +86,20 @@ static bool SendProxyDataCallback(uint32_t source_ip, uint16_t source_port,
                                    uint32_t dest_ip, uint16_t dest_port,
                                    ryu_ldn::bsd::ProtocolType protocol,
                                    const void* data, size_t data_len) {
-    std::scoped_lock lock(g_active_service_mutex);
-
-    if (g_active_ldn_service == nullptr) {
-        LOG_WARN("SendProxyDataCallback: g_active_ldn_service=nullptr, src=0x%08X:%u dst=0x%08X:%u",
-                 source_ip, source_port, dest_ip, dest_port);
-        return false;
+    // Take the target under the lock and send without it: a send can block
+    // for up to 5 s, and ConnectToServer/DisconnectFromServer (the latter
+    // also on the receive thread) and the other bsd:u threads need the lock.
+    // The in-flight count keeps the target alive; its destructor waits for it.
+    ICommunicationService* service;
+    {
+        std::scoped_lock lock(g_active_service_mutex);
+        service = g_active_ldn_service;
+        if (service == nullptr) {
+            LOG_WARN("SendProxyDataCallback: g_active_ldn_service=nullptr, src=0x%08X:%u dst=0x%08X:%u",
+                     source_ip, source_port, dest_ip, dest_port);
+            return false;
+        }
+        service->m_proxy_sends_in_flight++;
     }
 
     // Build ProxyDataHeader
@@ -111,13 +119,15 @@ static bool SendProxyDataCallback(uint32_t source_ip, uint16_t source_port,
             break;
         default:
             LOG_WARN("SendProxyDataCallback: unsupported protocol=%d", static_cast<int>(protocol));
+            service->m_proxy_sends_in_flight--;
             return false;
     }
 
     header.data_length = static_cast<uint32_t>(data_len);
 
     // Send via the LDN client
-    auto result = g_active_ldn_service->SendProxyDataToServer(header, data, data_len);
+    auto result = service->SendProxyDataToServer(header, data, data_len);
+    service->m_proxy_sends_in_flight--;  // last touch of service
     if (result != ryu_ldn::network::ClientOpResult::Success) {
         LOG_WARN("SendProxyDataCallback: SendProxyDataToServer failed: %s (src=0x%08X:%u dst=0x%08X:%u len=%zu)",
                  ryu_ldn::network::client_op_result_to_string(result),
@@ -295,6 +305,20 @@ ICommunicationService::~ICommunicationService() {
     // that auto-reconnect may have opened. It also disconnects P2P proxy
     // and resets ProxySocketManager when m_server_connected was true.
     DisconnectFromServer();
+
+    // No bsd:u sender may still be using this instance once it is freed.
+    // Unpublish even if DisconnectFromServer did not (m_server_connected can
+    // race the receive thread's inactivity disconnect), then wait out the
+    // sends that took the pointer before that.
+    {
+        std::scoped_lock lock(g_active_service_mutex);
+        if (g_active_ldn_service == this) {
+            g_active_ldn_service = nullptr;
+        }
+    }
+    while (m_proxy_sends_in_flight.load() != 0) {
+        svcSleepThread(1 * 1000000ULL);  // 1 ms; a send is bounded (5 s)
+    }
 
     // Step 3: Join the receive thread (now unblocked, exits quickly)
     os::WaitThread(&m_recv_thread);
