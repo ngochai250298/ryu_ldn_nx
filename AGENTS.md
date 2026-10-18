@@ -226,11 +226,11 @@ The `bsd:s` service type is used instead of `bsd:u` because UPnP's `upnpDiscover
 
 The network client (`RyuLdnClient` in `sysmodule/source/network/`) handles reconnection automatically:
 
-- **Fast first retry**: `ReconnectManager` starts with a 200ms delay on the first failure, then switches to exponential backoff (1s initial, 2x multiplier, 30s cap). This helps recover from brief WiFi blips.
+- **Fast first retry**: `ReconnectManager` starts with a 200ms delay on the first failure, then switches to exponential backoff (1s initial, 2x multiplier; RyuLdnClientConfig caps it at 10s). This helps recover from brief WiFi blips.
 - **Jitter**: Backoff delays include ±10% jitter to prevent thundering herd after server restarts.
 - **TCP keepalive**: Enabled on Switch with 30s idle / 10s interval / 5 probes — detects dead connections without RyuLDN protocol changes.
 - **Graceful disconnect**: Socket `close()` calls `shutdown(SHUT_WR)` before `close()` so the server sees FIN instead of RST.
-- **Auto-reconnect**: When `ConnectionLost` fires, the state machine transitions through `Backoff` → `Retrying` → `Connecting` automatically if `max_reconnect_attempts != 0`. Setting `max_reconnect_attempts = 0` **disables** auto-reconnect entirely — it does not mean infinite retries.
+- **Auto-reconnect**: When the transport drops, the state machine goes `Backoff` → `Retrying` → `Connecting` up to 10 times (`kMaxReconnectAttempts` in client.cpp; there is no config key), then gives up to `Disconnected`. The budget resets when the handshake reaches `Ready`. `ReconnectConfig::max_retries = 0` means no retries, not infinite ones. `connect()` while in `Backoff` cancels the timer and connects at once; while connected it returns Success.
 - **`ping_interval` is unused**: The `ping_interval` config key is parsed and stored but never consumed by the network client. Server-side pings drive keepalive behavior.
 - **`[perf]` section is dead**: The perf config keys are commented out in the example config and NOT parsed by the INI parser (no `Section::Perf` exists). They have zero runtime effect.
 

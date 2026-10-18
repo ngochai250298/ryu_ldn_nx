@@ -13,6 +13,7 @@
  */
 
 #include <stratosphere.hpp>
+#include <atomic>
 
 extern "C" {
 #include <switch/services/bsd.h>
@@ -144,17 +145,19 @@ namespace ams {
         // 0x101 on allocation failure.
         alignas(0x40) constinit u8 g_heap_memory[384_KB];
         constinit lmem::HeapHandle g_heap_handle;
-        constinit bool g_heap_initialized;
+        constinit std::atomic<bool> g_heap_initialized{false};
         constinit os::SdkMutex g_heap_init_mutex;
 
         lmem::HeapHandle GetHeapHandle() {
-            if (AMS_UNLIKELY(!g_heap_initialized)) {
+            // Acquire pairs with the release below, so a thread that sees
+            // true also sees g_heap_handle
+            if (AMS_UNLIKELY(!g_heap_initialized.load(std::memory_order_acquire))) {
                 std::scoped_lock lk(g_heap_init_mutex);
 
-                if (AMS_LIKELY(!g_heap_initialized)) {
+                if (AMS_LIKELY(!g_heap_initialized.load(std::memory_order_relaxed))) {
                     g_heap_handle = lmem::CreateExpHeap(g_heap_memory, sizeof(g_heap_memory),
                                                         lmem::CreateOption_ThreadSafe);
-                    g_heap_initialized = true;
+                    g_heap_initialized.store(true, std::memory_order_release);
                 }
             }
 
@@ -512,8 +515,21 @@ namespace ams {
 // Custom Memory Allocators
 // ============================================================================
 
+namespace {
+
+    /// Throwing new must never return nullptr (GCC drops the null checks
+    /// after it), and exceptions are off: abort with the cause instead of
+    /// crashing later on a near-null write.
+    void* AllocateOrAbort(size_t size) {
+        void* p = ams::mitm::Allocate(size != 0 ? size : 1);
+        AMS_ABORT_UNLESS(p != nullptr, "ryu_ldn heap exhausted (operator new, size=%zu)", size);
+        return p;
+    }
+
+}
+
 void* operator new(size_t size) {
-    return ams::mitm::Allocate(size);
+    return AllocateOrAbort(size);
 }
 
 void* operator new(size_t size, const std::nothrow_t&) {
@@ -529,7 +545,7 @@ void operator delete(void* p, size_t size) {
 }
 
 void* operator new[](size_t size) {
-    return ams::mitm::Allocate(size);
+    return AllocateOrAbort(size);
 }
 
 void* operator new[](size_t size, const std::nothrow_t&) {

@@ -67,9 +67,19 @@
  *
  * ## Thread Safety
  *
- * This class is designed to be used from a single thread. For multi-threaded
- * use, external synchronization is required. The update() method should be
- * called from the same thread that calls other methods.
+ * connect(), disconnect(), update() and set_config() serialise on one
+ * connection mutex, so a receive thread calling update() and IPC threads
+ * calling connect()/disconnect() never touch the transport, the state
+ * machine or the backoff timer at the same time. The state queries are
+ * lock-free (the state is atomic). The send_*() methods are lock-free
+ * too: they never change the state; a failed send leaves the transport
+ * disconnected and the next update() handles it.
+ *
+ * The state and packet callbacks run on the update()/connect()/
+ * disconnect() caller's thread with the connection mutex held. They may
+ * call send_*() and the queries, but must not call connect(),
+ * disconnect(), update() or set_config() (self-deadlock), and must not
+ * wait on a lock that a thread calling those holds.
  *
  * @copyright Copyright (c) 2026 ryu_ldn_nx contributors
  * @license GPL-2.0-or-later
@@ -80,6 +90,11 @@
 #include <cstdint>
 #include <cstddef>
 #include <memory>
+#ifdef TEST_BUILD
+#include <mutex>
+#else
+#include <stratosphere.hpp>
+#endif
 
 #include "itcp_client.hpp"
 #include "connection_state.hpp"
@@ -614,6 +629,14 @@ private:
     uint64_t m_last_rtt_ms;                 ///< Last measured round-trip time
     uint8_t m_ping_id;                      ///< Incrementing ping ID for tracking
 
+#ifdef TEST_BUILD
+    using ConnMutex = std::mutex;
+#else
+    using ConnMutex = ::ams::os::SdkMutex;
+#endif
+    /// Held by connect/disconnect/update/set_config; see Thread Safety
+    ConnMutex m_conn_mutex;
+
     // ========================================================================
     // Internal Methods
     // ========================================================================
@@ -624,6 +647,16 @@ private:
     static void state_machine_callback(ConnectionState old_state,
                                         ConnectionState new_state,
                                         ConnectionEvent event);
+
+    /**
+     * @brief Leave a connected state after a failure
+     *
+     * Applies the event, closes the transport and starts the backoff
+     * timer when the state machine moved to Backoff.
+     *
+     * @param event ConnectionLost, HandshakeFailed or FatalError
+     */
+    void handle_connection_lost(ConnectionEvent event);
 
     /**
      * @brief Attempt TCP connection

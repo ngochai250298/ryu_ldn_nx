@@ -1059,6 +1059,68 @@ TEST(send_recv_connected) {
     sock.close();
 }
 
+/**
+ * @test Errors on an established connection map to ConnectionReset
+ *
+ * EPIPE is what Horizon returns on send after a RST; before the fix it
+ * mapped to SocketError and the client never left Ready.
+ */
+TEST(established_errno_to_result_mappings) {
+    ASSERT_EQ(established_errno_to_result(EPIPE), SocketResult::ConnectionReset);
+    ASSERT_EQ(established_errno_to_result(ECONNRESET), SocketResult::ConnectionReset);
+    ASSERT_EQ(established_errno_to_result(ECONNABORTED), SocketResult::ConnectionReset);
+    ASSERT_EQ(established_errno_to_result(ETIMEDOUT), SocketResult::ConnectionReset);
+    ASSERT_EQ(established_errno_to_result(ENETDOWN), SocketResult::ConnectionReset);
+    ASSERT_EQ(established_errno_to_result(ENETRESET), SocketResult::ConnectionReset);
+    ASSERT_EQ(established_errno_to_result(ENOTCONN), SocketResult::ConnectionReset);
+    // Everything else falls through to errno_to_result
+    ASSERT_EQ(established_errno_to_result(EAGAIN), SocketResult::WouldBlock);
+    ASSERT_EQ(established_errno_to_result(EHOSTUNREACH), SocketResult::HostUnreachable);
+    ASSERT_EQ(established_errno_to_result(999), SocketResult::SocketError);
+}
+
+/**
+ * @test A peer RST makes send() report ConnectionReset and clear is_connected()
+ */
+TEST(send_after_peer_reset_is_connection_reset) {
+    socket_init();
+    int server_fd = -1;
+    uint16_t port = create_local_listener(server_fd);
+    ASSERT_NE(port, static_cast<uint16_t>(0));
+
+    Socket sock;
+    SocketResult cr = sock.connect("127.0.0.1", port, 2000);
+    ASSERT_EQ(cr, SocketResult::Success);
+    int accepted = ::accept(server_fd, nullptr, nullptr);
+    ASSERT_TRUE(accepted >= 0);
+
+    // Abortive close: SO_LINGER 0 sends RST instead of FIN
+    struct linger lg = {1, 0};
+    setsockopt(accepted, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
+    ::close(accepted);
+    usleep(50 * 1000);
+
+    uint8_t data[64] = {};
+    SocketResult sr = SocketResult::Success;
+    for (int i = 0; i < 10 && sr == SocketResult::Success; i++) {
+        size_t sent = 0;
+        sr = sock.send(data, sizeof(data), sent);
+    }
+    ASSERT_EQ(sr, SocketResult::ConnectionReset);
+    ASSERT_TRUE(!sock.is_connected());
+
+    // Reconnecting must not reuse the dead fd (EINVAL on Horizon)
+    ASSERT_EQ(sock.connect("127.0.0.1", port, 2000), SocketResult::Success);
+    int accepted2 = ::accept(server_fd, nullptr, nullptr);
+    ASSERT_TRUE(accepted2 >= 0);
+    size_t sent = 0;
+    ASSERT_EQ(sock.send(data, sizeof(data), sent), SocketResult::Success);
+
+    ::close(accepted2);
+    ::close(server_fd);
+    sock.close();
+}
+
 // =============================================================================
 // Main
 // =============================================================================

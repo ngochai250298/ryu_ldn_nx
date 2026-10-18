@@ -141,7 +141,12 @@ ClientResult TcpClient::connect(const char* host, uint16_t port, uint32_t timeou
  */
 void TcpClient::disconnect() {
     LOG_VERBOSE("TcpClient::disconnect()");
-    m_socket.close();
+    {
+        // Never close the fd under a sender (it could then write to a
+        // reused descriptor number)
+        std::scoped_lock lock(m_send_mutex);
+        m_socket.close();
+    }
     m_recv_buffer.reset();
 }
 

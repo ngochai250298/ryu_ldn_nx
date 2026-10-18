@@ -661,3 +661,25 @@ config_ipc_service_tests.o: config_ipc_service_tests.cpp
 p2p_frame_tests.o: p2p_frame_tests.cpp \
 	../sysmodule/source/p2p/p2p_frame.hpp \
 	../sysmodule/source/protocol/ryu_protocol.hpp
+
+# DNS wrapper tests (include dns_wrap.cpp directly for its internal functions).
+# Hooked into all/test/clean as extra prerequisites so the shared lines
+# above stay untouched.
+TARGET_DNS_WRAP := run_dns_wrap_tests
+$(TARGET_DNS_WRAP): dns_wrap_tests.o log.o config.o
+	$(CXX) $(LDFLAGS) -o $@ $^
+
+dns_wrap_tests.o: dns_wrap_tests.cpp ../sysmodule/source/network/dns_wrap.cpp
+
+.PHONY: test-dns-wrap clean-dns-wrap
+test-dns-wrap: $(TARGET_DNS_WRAP)
+	@echo ""
+	@echo "=== Running DNS Wrapper Tests ==="
+	./$(TARGET_DNS_WRAP)
+
+clean-dns-wrap:
+	rm -f $(TARGET_DNS_WRAP)
+
+all: $(TARGET_DNS_WRAP)
+test: test-dns-wrap
+clean: clean-dns-wrap

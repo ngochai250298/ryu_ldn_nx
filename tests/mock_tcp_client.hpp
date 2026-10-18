@@ -9,6 +9,7 @@
 #pragma once
 
 #include "network/itcp_client.hpp"
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -25,7 +26,7 @@ struct MockPacket {
 
 class MockTcpClient : public ITcpClient {
 public:
-    bool connected = false;
+    std::atomic<bool> connected{false};
     bool initialized = false;
     bool initialize_should_fail = false;
 
@@ -85,89 +86,97 @@ public:
         return connected;
     }
 
+    /** Like the real transports, a lost connection reads as disconnected. */
+    ClientResult send_result() {
+        if (next_send_result == ClientResult::ConnectionLost) {
+            connected = false;
+        }
+        return next_send_result;
+    }
+
     ClientResult send_packet(protocol::PacketId type, const void* payload, size_t payload_size) override {
         send_packet_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_raw(const void* data, size_t size) override {
         send_raw_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_initialize(const protocol::InitializeMessage& msg) override {
         send_initialize_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_passphrase(const protocol::PassphraseMessage& msg) override {
         send_passphrase_msg_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_passphrase(const char* passphrase) override {
         send_passphrase_str_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_ping(const protocol::PingMessage& msg) override {
         send_ping_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_disconnect(const protocol::DisconnectMessage& msg) override {
         send_disconnect_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_create_access_point(const protocol::CreateAccessPointRequest& request,
                                             const uint8_t* advertise_data,
                                             size_t advertise_size) override {
         send_create_access_point_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_create_access_point_private(const protocol::CreateAccessPointPrivateRequest& request,
                                                     const uint8_t* advertise_data,
                                                     size_t advertise_size) override {
         send_create_access_point_private_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_connect(const protocol::ConnectRequest& request) override {
         send_connect_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_connect_private(const protocol::ConnectPrivateRequest& request) override {
         send_connect_private_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_scan(const protocol::ScanFilterFull& filter) override {
         send_scan_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_proxy_data(const protocol::ProxyDataHeader& header,
                                   const uint8_t* data, size_t data_size) override {
         send_proxy_data_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_set_accept_policy(const protocol::SetAcceptPolicyRequest& request) override {
         send_set_accept_policy_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_set_advertise_data(const uint8_t* data, size_t size) override {
         send_set_advertise_data_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult send_reject(const protocol::RejectRequest& request) override {
         send_reject_call_count++;
-        return next_send_result;
+        return send_result();
     }
 
     ClientResult receive_packet(protocol::PacketId& type,
@@ -183,6 +192,9 @@ public:
             payload_size = 0;
             if (next_recv_result == ClientResult::Success) {
                 return ClientResult::Timeout;
+            }
+            if (next_recv_result == ClientResult::ConnectionLost) {
+                connected = false;
             }
             return next_recv_result;
         }

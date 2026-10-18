@@ -141,7 +141,7 @@ struct ReconnectConfig {
      * - 30 second max delay
      * - 2x multiplier
      * - 10% jitter
-     * - Infinite retries
+     * - No retries (max_retries 0; RyuLdnClientConfig sets its own limit)
      * - 1 fast retry at 200ms
      */
     ReconnectConfig()

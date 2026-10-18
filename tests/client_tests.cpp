@@ -48,7 +48,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <chrono>
 #include <memory>
+#include <thread>
 
 #include "network/client.hpp"
 #include "network/socket.hpp"
@@ -266,6 +269,21 @@ bool test_config_from_app_config() {
     ASSERT_EQ(cfg.connect_timeout_ms, 5000);
     ASSERT_EQ(cfg.ping_interval_ms, 0);  // ping_interval is forced to 0
     ASSERT_EQ(cfg.reconnect.initial_delay_ms, 1000);
+    return true;
+}
+
+/**
+ * @brief The stored passphrase is sent only when use_passphrase is on
+ */
+bool test_config_passphrase_respects_use_passphrase() {
+    config::Config app_cfg = config::get_default_config();
+    std::strncpy(app_cfg.ldn.passphrase, "Ryujinx-1234abcd", sizeof(app_cfg.ldn.passphrase) - 1);
+
+    app_cfg.ldn.use_passphrase = false;
+    ASSERT_STREQ(RyuLdnClientConfig(app_cfg).passphrase, "");
+
+    app_cfg.ldn.use_passphrase = true;
+    ASSERT_STREQ(RyuLdnClientConfig(app_cfg).passphrase, "Ryujinx-1234abcd");
     return true;
 }
 
@@ -723,7 +741,10 @@ bool test_connect_fail_backoff() {
 }
 
 /**
- * @brief Test connect failure with auto_reconnect=false stays in Backoff
+ * @brief Test connect failure with auto_reconnect=false ends in Disconnected
+ *
+ * It used to park in Backoff with no timer, and the next update() retried
+ * anyway.
  */
 bool test_connect_fail_no_reconnect() {
     MockTcpClient* mock;
@@ -731,12 +752,12 @@ bool test_connect_fail_no_reconnect() {
 
     mock->next_connect_result = ClientResult::ConnectionFailed;
     client->connect("127.0.0.1", 30456);
-    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
     return true;
 }
 
 /**
- * @brief Test connect() returns AlreadyConnected when already connected
+ * @brief Test connect() while connected or Ready succeeds without reconnecting
  */
 bool test_connect_already_connected() {
     MockTcpClient* mock;
@@ -746,7 +767,14 @@ bool test_connect_already_connected() {
     client->connect("127.0.0.1", 30456);
 
     ClientOpResult result = client->connect("127.0.0.1", 30456);
-    ASSERT_EQ(result, ClientOpResult::AlreadyConnected);
+    ASSERT_EQ(result, ClientOpResult::Success);
+    ASSERT_EQ(mock->connect_call_count, 1);
+
+    drive_to_ready(client.get(), mock, 1000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
+    ASSERT_EQ(client->connect(), ClientOpResult::Success);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
+    ASSERT_EQ(mock->connect_call_count, 1);
     return true;
 }
 
@@ -1035,7 +1063,7 @@ bool test_update_handshaking_recv_disconnect() {
 }
 
 /**
- * @brief Test handshake timeout with auto_reconnect=false still transitions to Backoff
+ * @brief Test handshake timeout with auto_reconnect=false gives up to Disconnected
  */
 bool test_handshake_timeout_no_reconnect() {
     MockTcpClient* mock;
@@ -1049,7 +1077,8 @@ bool test_handshake_timeout_no_reconnect() {
     mock->next_recv_result = ClientResult::Timeout;
     client->update(7000);
 
-    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
+    ASSERT_TRUE(!mock->is_connected());
     return true;
 }
 
@@ -1147,10 +1176,7 @@ bool test_update_backoff_expiry_and_retry() {
 }
 
 /**
- * @brief Test that with auto_reconnect=false, Backoff state persists
- *
- * The state machine still transitions to Backoff, but no retry timer
- * is started, so the client stays in Backoff indefinitely.
+ * @brief Test that with auto_reconnect=false a failure never retries
  */
 bool test_update_backoff_no_reconnect() {
     MockTcpClient* mock;
@@ -1158,10 +1184,12 @@ bool test_update_backoff_no_reconnect() {
 
     mock->next_connect_result = ClientResult::ConnectionFailed;
     client->connect("127.0.0.1", 30456);
-    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
 
     client->update(50000);
-    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    client->update(60000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
+    ASSERT_EQ(mock->connect_call_count, 1);
     return true;
 }
 
@@ -1236,8 +1264,239 @@ bool test_send_scan_connection_lost_callback() {
     ClientOpResult result = client->send_scan(filter);
 
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     ASSERT_TRUE(g_state_changes.size() >= 1);
+    return true;
+}
+
+/**
+ * @brief A transport that drops with a non-ConnectionLost result still reconnects
+ *
+ * Finding 3: before the fix, a send failing with EPIPE (SocketError) left
+ * the socket disconnected while the state machine stayed Ready forever.
+ */
+bool test_transport_drop_with_generic_error_leaves_ready() {
+    MockTcpClient* mock;
+    auto client = make_client(mock);
+    clear_state_changes();
+    client->set_state_callback(state_callback);
+    drive_to_ready(client.get(), mock, 1000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
+    uint32_t disconnects_before = mock->disconnect_call_count;
+
+    // Transport went dead but reported a generic error, not ConnectionLost
+    mock->next_send_result = ClientResult::InternalError;
+    mock->connected = false;
+    ScanFilterFull filter{};
+    ASSERT_EQ(client->send_scan(filter), ClientOpResult::SendFailed);
+
+    mock->next_recv_result = ClientResult::Timeout;
+    client->update(2000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    // The dead transport was closed so the retry starts from a fresh fd
+    ASSERT_EQ(mock->disconnect_call_count, disconnects_before + 1);
+    ASSERT_TRUE(g_state_changes.size() >= 1);
+    return true;
+}
+
+// ============================================================================
+// Reconnect policy (finding 6)
+// ============================================================================
+
+/**
+ * @brief connect() during Backoff cancels the timer and connects at once
+ *
+ * ldn's ConnectToServer used to get InvalidState here, forever.
+ */
+bool test_connect_from_backoff_connects_now() {
+    MockTcpClient* mock;
+    auto client = make_client(mock);
+
+    mock->next_connect_result = ClientResult::ConnectionFailed;
+    client->connect("127.0.0.1", 30456);
+    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+
+    mock->next_connect_result = ClientResult::Success;
+    ASSERT_EQ(client->connect(), ClientOpResult::Success);
+    ASSERT_EQ(mock->connect_call_count, 2);
+    ASSERT_EQ(client->get_state(), ConnectionState::Connected);
+    return true;
+}
+
+/**
+ * @brief The first retry uses the 200 ms fast delay
+ */
+bool test_first_retry_uses_fast_delay() {
+    MockTcpClient* mock;
+    auto client = make_client(mock);
+
+    mock->next_connect_result = ClientResult::ConnectionFailed;
+    client->connect("127.0.0.1", 30456);
+    client->update(10000);        // starts the timer
+    client->update(10000 + 250);  // 200 ms +10% jitter has passed
+    ASSERT_EQ(mock->connect_call_count, 2);
+    return true;
+}
+
+/**
+ * @brief Drive Backoff/retry cycles until the client stops retrying
+ * @return number of transport connect() calls, or 0 if it never gave up
+ */
+static uint32_t run_until_gave_up(RyuLdnClient* client, MockTcpClient* mock, uint64_t t) {
+    for (int i = 0; i < 200; i++) {
+        t += 20000;  // past any backoff delay (10 s cap)
+        client->update(t);
+        if (client->get_state() == ConnectionState::Disconnected) {
+            return mock->connect_call_count;
+        }
+    }
+    return 0;
+}
+
+/**
+ * @brief Connect failures stop after the retry limit, in Disconnected
+ */
+bool test_retry_limit_gives_up() {
+    MockTcpClient* mock;
+    auto client = make_client(mock);
+    ASSERT_EQ(client->get_config().reconnect.max_retries, 10);
+
+    mock->next_connect_result = ClientResult::ConnectionFailed;
+    client->connect("127.0.0.1", 30456);
+    ASSERT_EQ(run_until_gave_up(client.get(), mock, 1000), 1u + 10u);
+    ASSERT_EQ(client->get_retry_count(), 0u);
+
+    // A later connect() starts with a full budget
+    mock->next_connect_result = ClientResult::Success;
+    ASSERT_EQ(client->connect(), ClientOpResult::Success);
+    ASSERT_TRUE(client->is_connected());
+    return true;
+}
+
+/**
+ * @brief Handshake failures count toward the limit; Ready resets it
+ *
+ * The budget used to reset on every TCP connect, so a relay that
+ * accepted TCP and then failed the handshake was retried forever.
+ */
+bool test_handshake_failures_count_toward_limit() {
+    MockTcpClient* mock;
+    auto client = make_client(mock);
+
+    mock->next_connect_result = ClientResult::Success;
+    mock->next_send_result = ClientResult::InternalError;  // handshake send fails
+    client->connect("127.0.0.1", 30456);
+    ASSERT_EQ(run_until_gave_up(client.get(), mock, 1000), 1u + 10u);
+
+    // One failure, then a good handshake: the count goes back to 0
+    mock->next_send_result = ClientResult::Success;
+    mock->next_connect_result = ClientResult::ConnectionFailed;
+    client->connect("127.0.0.1", 30456);
+    ASSERT_EQ(client->get_retry_count(), 1u);
+    mock->next_connect_result = ClientResult::Success;
+    client->update(500000);  // backoff long expired: retries, Connected
+    client->update(520000);  // sends the handshake
+    ASSERT_EQ(client->get_state(), ConnectionState::Handshaking);
+    MockPacket init_pkt;
+    init_pkt.id = PacketId::Initialize;
+    init_pkt.data.resize(sizeof(InitializeMessage));
+    mock->recv_queue.push(std::move(init_pkt));
+    client->update(520100);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
+    ASSERT_EQ(client->get_retry_count(), 0u);
+    return true;
+}
+
+// ============================================================================
+// Concurrency (finding 7)
+// ============================================================================
+
+/**
+ * @brief Mock that flags connect()/disconnect() overlapping a receive
+ *
+ * The real transports are not safe against that: TcpClient closes the
+ * fd and resets the buffer under the reader, WssClient frees the TLS
+ * session while the reader polls the fd.
+ */
+class OverlapMock : public MockTcpClient {
+public:
+    std::atomic<bool> in_recv{false};
+    std::atomic<bool> overlap{false};
+
+    ClientResult connect(const char* host, uint16_t port, uint32_t timeout_ms) override {
+        if (in_recv) overlap = true;
+        return MockTcpClient::connect(host, port, timeout_ms);
+    }
+    void disconnect() override {
+        if (in_recv) overlap = true;
+        MockTcpClient::disconnect();
+    }
+    ClientResult receive_packet(PacketId& type, void* payload, size_t payload_buffer_size,
+                                size_t& payload_size, int32_t /*timeout_ms*/) override {
+        in_recv = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        in_recv = false;
+        (void)payload; (void)payload_buffer_size;
+        type = static_cast<PacketId>(0xFF);
+        payload_size = 0;
+        return ClientResult::Timeout;
+    }
+};
+
+/**
+ * @brief connect()/disconnect() on one thread never overlap update() on another
+ *
+ * Mirrors ldn: the receive thread calls update() while IPC threads call
+ * connect()/disconnect(). Under the old code the transport saw
+ * disconnect() in the middle of receive_packet(). Both sides run on
+ * worker threads with a timed join, so a deadlock fails the test instead
+ * of hanging the suite.
+ */
+bool test_concurrent_connect_disconnect_vs_update() {
+    auto owned = std::make_unique<OverlapMock>();
+    OverlapMock* mock = owned.get();
+    RyuLdnClientConfig cfg;
+    cfg.auto_reconnect = true;
+    RyuLdnClient client(cfg, std::move(owned));
+    client.connect("127.0.0.1", 30456);
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> finished{0};
+    std::thread recv_thread([&] {
+        uint64_t t = 1000;
+        while (!stop) {
+            client.update(t += 5);
+            // Like ldn's ReceiveThreadFunc; std::mutex is not fair, so a
+            // bare re-lock loop would starve the IPC thread
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        finished++;
+    });
+    std::thread ipc_thread([&] {
+        for (int i = 0; i < 100; i++) {
+            client.disconnect();
+            client.connect();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        stop = true;
+        finished++;
+    });
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (finished < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (finished < 2) {
+        printf("    FAIL: threads did not finish in 10 s (deadlock)\n");
+        fflush(stdout);
+        std::_Exit(1);  // Cannot join or destroy the client safely
+    }
+    recv_thread.join();
+    ipc_thread.join();
+    ASSERT_TRUE(!mock->overlap);
     return true;
 }
 
@@ -1500,15 +1759,25 @@ bool test_handle_packet_pong_response() {
     return true;
 }
 
+/** @brief Packet IDs seen by recording_packet_callback */
+static std::vector<PacketId> g_packets_seen;
+
+static void recording_packet_callback(PacketId id, const uint8_t*, size_t, void*) {
+    g_packets_seen.push_back(id);
+}
+
 /**
- * @brief Test that Disconnect packet from server triggers Disconnect event
+ * @brief Test that a server Disconnect packet reaches the packet callback
  *
- * Per Ryujinx: server sends PacketId::Disconnect to tell client to
- * disconnect. The client processes it via handle_packet → Disconnect event.
+ * The server sends Disconnect when the host closes the room or kicks us
+ * (HostedGame.cs). It is a room-level event for the LDN layer: the client
+ * forwards it and keeps the server session (and the TCP state) as is.
  */
 bool test_handle_packet_disconnect() {
     MockTcpClient* mock;
     auto client = make_client(mock);
+    g_packets_seen.clear();
+    client->set_packet_callback(recording_packet_callback);
 
     drive_to_ready(client.get(), mock, 1000);
 
@@ -1520,10 +1789,10 @@ bool test_handle_packet_disconnect() {
     mock->next_recv_result = ClientResult::Success;
     client->update(2000);
 
-    // Disconnect event moves state to Disconnecting (not Disconnected directly)
-    ASSERT_TRUE(client->get_state() == ConnectionState::Disconnecting
-                || client->get_state() == ConnectionState::Disconnected
-                || client->get_state() == ConnectionState::Backoff);
+    ASSERT_EQ(g_packets_seen.size(), 1);
+    ASSERT_EQ(g_packets_seen[0], PacketId::Disconnect);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
+    ASSERT_EQ(mock->disconnect_call_count, 0);
     return true;
 }
 
@@ -1690,6 +1959,9 @@ bool test_send_create_access_point_connection_lost() {
     CreateAccessPointRequest req{};
     ClientOpResult result = client->send_create_access_point(req);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     ASSERT_TRUE(g_state_changes.size() >= 1);
     return true;
@@ -1707,6 +1979,9 @@ bool test_send_connect_request_connection_lost() {
     ConnectRequest req{};
     ClientOpResult result = client->send_connect(req);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     ASSERT_TRUE(g_state_changes.size() >= 1);
     return true;
@@ -1724,6 +1999,9 @@ bool test_send_create_access_point_private_connection_lost() {
     CreateAccessPointPrivateRequest req{};
     ClientOpResult result = client->send_create_access_point_private(req);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1740,6 +2018,9 @@ bool test_send_connect_private_connection_lost() {
     ConnectPrivateRequest req{};
     ClientOpResult result = client->send_connect_private(req);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1757,6 +2038,9 @@ bool test_send_proxy_data_connection_lost() {
     uint8_t data[] = {0x01, 0x02};
     ClientOpResult result = client->send_proxy_data(hdr, data, sizeof(data));
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1772,6 +2056,9 @@ bool test_send_ping_response_connection_lost() {
     mock->next_send_result = ClientResult::ConnectionLost;
     ClientOpResult result = client->send_ping_response(1);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1787,6 +2074,9 @@ bool test_send_disconnect_network_connection_lost() {
     mock->next_send_result = ClientResult::ConnectionLost;
     ClientOpResult result = client->send_disconnect_network();
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1802,6 +2092,9 @@ bool test_send_set_accept_policy_connection_lost() {
     mock->next_send_result = ClientResult::ConnectionLost;
     ClientOpResult result = client->send_set_accept_policy(AcceptPolicy::AcceptAll);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1818,6 +2111,9 @@ bool test_send_set_advertise_data_connection_lost() {
     uint8_t data[] = {0x01, 0x02};
     ClientOpResult result = client->send_set_advertise_data(data, sizeof(data));
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1833,6 +2129,9 @@ bool test_send_reject_connection_lost() {
     mock->next_send_result = ClientResult::ConnectionLost;
     ClientOpResult result = client->send_reject(1, DisconnectReason::Rejected);
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -1849,6 +2148,9 @@ bool test_send_raw_packet_connection_lost() {
     uint8_t data[] = {0x01, 0x02, 0x03};
     ClientOpResult result = client->send_raw_packet(data, sizeof(data));
     ASSERT_EQ(result, ClientOpResult::SendFailed);
+    // The sender's thread never drives the state; the next update() does
+    ASSERT_TRUE(!mock->is_connected());
+    client->update(3000);
     ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
     return true;
 }
@@ -2143,41 +2445,24 @@ bool test_send_initialize_generic_failure() {
 // ============================================================================
 
 /**
- * @brief Test that update(Backoff) with auto_reconnect=false and expired
- *        backoff still transitions to Retrying (but no auto-start_backoff)
- *
- * Even with auto_reconnect=false, is_backoff_expired() can be true
- * if time has advanced. The state machine allows BackoffExpired → Retrying.
+ * @brief Test that a dropped Ready session with auto_reconnect=false
+ *        closes the transport and stays Disconnected
  */
 bool test_update_backoff_expired_no_reconnect_stays() {
     MockTcpClient* mock;
     auto client = make_client_no_reconnect(mock);
+    drive_to_ready(client.get(), mock, 1000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Ready);
 
-    mock->next_connect_result = ClientResult::ConnectionFailed;
-    client->connect("127.0.0.1", 30456);
-    ASSERT_EQ(client->get_state(), ConnectionState::Backoff);
+    mock->next_recv_result = ClientResult::ConnectionLost;
+    client->update(2000);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
 
-    // Advance time past backoff delay, but with no auto reconnect,
-    // start_backoff was called in try_connect → sets m_backoff_start_time_ms
+    mock->next_connect_result = ClientResult::Success;
     client->update(50000);
     client->update(60000);
-
-    // With auto_reconnect=false, we still entered Backoff but try_connect
-    // wasn't called from BackoffExpired because... actually let's check:
-    // start_backoff IS called in try_connect on failure even with
-    // auto_reconnect=false? No - looking at try_connect():
-    // if (m_config.auto_reconnect) { start_backoff(); }
-    // So with auto_reconnect=false, start_backoff() is NOT called,
-    // m_backoff_start_time_ms stays 0, is_backoff_expired() captures time
-    // on first check, returns false. Second check returns true.
-    // Then BackoffExpired → Retrying → try_connect → fail → ...
-    // but auto_reconnect=false so no start_backoff → stays in... what?
-    // BackoffExpired → Retrying, try_connect fails → ConnectFailed → Backoff
-    // but no start_backoff means m_backoff_start_time_ms stays at previous value.
-    // Actually let's just check the state.
-    ASSERT_TRUE(client->get_state() == ConnectionState::Backoff
-                || client->get_state() == ConnectionState::Retrying
-                || client->get_state() == ConnectionState::Disconnected);
+    ASSERT_EQ(client->get_state(), ConnectionState::Disconnected);
+    ASSERT_EQ(mock->connect_call_count, 1);
     return true;
 }
 
@@ -2314,6 +2599,7 @@ int main() {
     printf("Configuration:\n");
     RUN_TEST(test_config_defaults);
     RUN_TEST(test_config_from_app_config);
+    RUN_TEST(test_config_passphrase_respects_use_passphrase);
 
     printf("\nConstruction:\n");
     RUN_TEST(test_default_construction);
@@ -2397,6 +2683,12 @@ int main() {
     RUN_TEST(test_update_disconnecting);
     RUN_TEST(test_update_error_state_noop);
     RUN_TEST(test_send_scan_connection_lost_callback);
+    RUN_TEST(test_transport_drop_with_generic_error_leaves_ready);
+    RUN_TEST(test_connect_from_backoff_connects_now);
+    RUN_TEST(test_first_retry_uses_fast_delay);
+    RUN_TEST(test_retry_limit_gives_up);
+    RUN_TEST(test_handshake_failures_count_toward_limit);
+    RUN_TEST(test_concurrent_connect_disconnect_vs_update);
 
     printf("\nconnect() edge cases:\n");
     RUN_TEST(test_connect_no_args);
@@ -2408,7 +2700,7 @@ int main() {
     printf("\nhandle_packet (Ping, Disconnect, unknown):\n");
     RUN_TEST(test_handle_packet_ping_echo);
     // RUN_TEST(test_handle_packet_pong_response);
-    // RUN_TEST(test_handle_packet_disconnect);
+    RUN_TEST(test_handle_packet_disconnect);
     RUN_TEST(test_handle_packet_unknown_forwarded_to_callback);
 
     printf("\nupdate(Ready) ping paths:\n");

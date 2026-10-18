@@ -112,4 +112,4 @@ LDN IPs in `NetworkInfo`, `ProxyConfig`, `m_ipv4_address`, and `GetIpv4Address()
 - **WaitForResponse spurious timeout (fixed)**: When `WaitForResponse` receives an unexpected response-type packet (e.g., `ProxyConnectReply` while waiting for `Connected`), it must `continue` waiting — not fall through to a timeout break.
 - **`ping_interval` is unused**: The `ping_interval` config key is parsed and stored but never consumed by the network client.
 - **`[perf]` section is dead**: The perf config keys are commented out and NOT parsed by the INI parser (no `Section::Perf`). They have zero runtime effect.
-- **`max_reconnect_attempts = 0` disables auto-reconnect**: It does not mean infinite retries — it means the client will not retry at all.
+- **Reconnect limit**: there is no `max_reconnect_attempts` config key. `RyuLdnClient` retries 10 times (`kMaxReconnectAttempts`), then goes to `Disconnected`. `ReconnectConfig::max_retries = 0` means no retries, not infinite ones.
