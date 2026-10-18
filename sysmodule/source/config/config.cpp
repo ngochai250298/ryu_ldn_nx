@@ -86,6 +86,61 @@ uint16_t parse_uint16(const char* value) {
     return static_cast<uint16_t>(std::strtoul(value, nullptr, 10));
 }
 
+/**
+ * @brief Store the relay token if it is exactly 64 hex characters
+ *
+ * The token is normalised to lowercase (the relay hashes the exact string).
+ * Anything else leaves the token empty so the client refuses to connect.
+ */
+void parse_token(const char* value, char* token) {
+    token[0] = '\0';
+    if (std::strlen(value) != TOKEN_LENGTH) {
+        return;
+    }
+    for (size_t i = 0; i < TOKEN_LENGTH; i++) {
+        char c = value[i];
+        if (c >= 'A' && c <= 'F') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            token[0] = '\0';
+            return;
+        }
+        token[i] = c;
+    }
+    token[TOKEN_LENGTH] = '\0';
+}
+
+/**
+ * @brief Store the console ID if it matches the relay's [a-z0-9-]{1,32} rule
+ */
+void parse_console_id(const char* value, char* console_id) {
+    console_id[0] = '\0';
+    size_t len = std::strlen(value);
+    if (len == 0 || len > MAX_CONSOLE_ID_LENGTH) {
+        return;
+    }
+    for (size_t i = 0; i < len; i++) {
+        char c = value[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) {
+            return;
+        }
+    }
+    safe_strcpy(console_id, value, MAX_CONSOLE_ID_LENGTH);
+}
+
+/**
+ * @brief Enforce cross-section rules after a load
+ *
+ * P2P opens sockets outside the TLS-protected relay path, so it is
+ * forced off whenever the secure transport is selected.
+ */
+void apply_constraints(Config& config) {
+    if (config.server.transport == Transport::Wss) {
+        config.ldn.disable_p2p = true;
+    }
+}
+
 // Section identifiers
 enum class Section {
     None,
@@ -114,6 +169,16 @@ void process_server_key(const char* key, const char* value, ServerConfig& config
         safe_strcpy(config.host, value, MAX_HOST_LENGTH);
     } else if (std::strcmp(key, "port") == 0) {
         config.port = parse_uint16(value);
+    } else if (std::strcmp(key, "transport") == 0) {
+        config.transport = std::strcmp(value, "wss") == 0 ? Transport::Wss : Transport::None;
+    } else if (std::strcmp(key, "path") == 0) {
+        safe_strcpy(config.path, value, MAX_PATH_LENGTH);
+    } else if (std::strcmp(key, "console_id") == 0) {
+        parse_console_id(value, config.console_id);
+    } else if (std::strcmp(key, "token") == 0) {
+        parse_token(value, config.token);
+    } else if (std::strcmp(key, "ca_file") == 0) {
+        safe_strcpy(config.ca_file, value, MAX_CA_FILE_LENGTH);
     }
 }
 
@@ -243,11 +308,17 @@ size_t format_config_content(char* buffer, size_t buffer_size, const Config& con
     WRITE_LINE("");
 
     WRITE_LINE("[server]");
-    WRITE_LINE("; Server hostname or IP address");
+    WRITE_LINE("; Relay hostname (empty = do not connect)");
     WRITE_LINE("host = %s", config.server.host);
     WRITE_LINE("; Server port");
-    WRITE_LINE("");
-
+    WRITE_LINE("port = %u", config.server.port);
+    WRITE_LINE("; Secure WebSocket transport (plain TCP is refused)");
+    WRITE_LINE("transport = %s", config.server.transport == Transport::Wss ? "wss" : "");
+    WRITE_LINE("path = %s", config.server.path);
+    WRITE_LINE("console_id = %s", config.server.console_id);
+    WRITE_LINE("; Secret: 64 hex characters, one per console");
+    WRITE_LINE("token = %s", config.server.token);
+    WRITE_LINE("ca_file = %s", config.server.ca_file);
     WRITE_LINE("");
 
     WRITE_LINE("[ldn]");
@@ -285,6 +356,11 @@ Config get_default_config() {
     // Server defaults
     safe_strcpy(config.server.host, DEFAULT_HOST, MAX_HOST_LENGTH);
     config.server.port = DEFAULT_PORT;
+    config.server.transport = DEFAULT_TRANSPORT;
+    safe_strcpy(config.server.path, DEFAULT_PATH, MAX_PATH_LENGTH);
+    config.server.console_id[0] = '\0';
+    config.server.token[0] = '\0';
+    safe_strcpy(config.server.ca_file, DEFAULT_CA_FILE, MAX_CA_FILE_LENGTH);
 
     // LDN defaults
     config.ldn.enabled = DEFAULT_LDN_ENABLED;
@@ -358,7 +434,10 @@ ConfigResult load_config(const char* path, Config& config) {
 
     // Parse content
     parse_config_content(content, bytes_read, config);
+    apply_constraints(config);
 
+    // The buffer held the relay token
+    std::memset(content, 0, bytes_read);
     delete[] content;
     return ConfigResult::Success;
 }
@@ -392,6 +471,7 @@ ConfigResult save_config(const char* path, const Config& config) {
 
     // Create new file
     if (R_FAILED(ams::fs::CreateFile(path, content_size))) {
+        std::memset(buffer, 0, buffer_size);  // held the relay token
         delete[] buffer;
         return ConfigResult::IoError;
     }
@@ -399,6 +479,7 @@ ConfigResult save_config(const char* path, const Config& config) {
     // Open file for writing
     ams::fs::FileHandle file;
     if (R_FAILED(ams::fs::OpenFile(&file, path, ams::fs::OpenMode_Write))) {
+        std::memset(buffer, 0, buffer_size);  // held the relay token
         delete[] buffer;
         return ConfigResult::IoError;
     }
@@ -407,6 +488,7 @@ ConfigResult save_config(const char* path, const Config& config) {
     ams::Result write_result = ams::fs::WriteFile(file, 0, buffer, content_size, ams::fs::WriteOption::Flush);
     ams::fs::CloseFile(file);
 
+    std::memset(buffer, 0, buffer_size);  // held the relay token
     delete[] buffer;
 
     if (R_FAILED(write_result)) {
@@ -512,6 +594,7 @@ ConfigResult load_config(const char* path, Config& config) {
     }
 
     std::fclose(file);
+    apply_constraints(config);
     return ConfigResult::Success;
 }
 
@@ -541,10 +624,17 @@ ConfigResult save_config(const char* path, const Config& config) {
     std::fprintf(file, "; Edit this file to customize settings\n\n");
 
     std::fprintf(file, "[server]\n");
-    std::fprintf(file, "; Server hostname or IP address\n");
+    std::fprintf(file, "; Relay hostname (empty = do not connect)\n");
     std::fprintf(file, "host = %s\n", config.server.host);
     std::fprintf(file, "; Server port\n");
     std::fprintf(file, "port = %u\n", config.server.port);
+    std::fprintf(file, "; Secure WebSocket transport (plain TCP is refused)\n");
+    std::fprintf(file, "transport = %s\n", config.server.transport == Transport::Wss ? "wss" : "");
+    std::fprintf(file, "path = %s\n", config.server.path);
+    std::fprintf(file, "console_id = %s\n", config.server.console_id);
+    std::fprintf(file, "; Secret: 64 hex characters, one per console\n");
+    std::fprintf(file, "token = %s\n", config.server.token);
+    std::fprintf(file, "ca_file = %s\n\n", config.server.ca_file);
 
 
     std::fprintf(file, "[ldn]\n");

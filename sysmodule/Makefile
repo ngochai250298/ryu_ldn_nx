@@ -41,6 +41,12 @@ CXXFLAGS	+= $(VERSION_DEFINES)
 LIBS		+= -lminiupnpc
 
 #---------------------------------------------------------------------------------
+# TLS for the wss:// relay transport (network/wss_client.cpp)
+# switch-mbedtls is provided by devkitPro; link order matters
+#---------------------------------------------------------------------------------
+LIBS		+= -lmbedtls -lmbedx509 -lmbedcrypto
+
+#---------------------------------------------------------------------------------
 # Resolver wrappers — sfdnsres-backed getaddrinfo()/freeaddrinfo()/getnameinfo()
 # from libnx DABRT in our boot2 sysmodule context. We redirect every call
 # (including those baked into libminiupnpc.a) to inet_pton-based stubs in

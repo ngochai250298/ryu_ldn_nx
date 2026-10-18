@@ -301,6 +301,19 @@ bool test_construction_with_config() {
 }
 
 /**
+ * @brief Test a config without transport = wss refuses to connect (no plain TCP)
+ */
+bool test_connect_refused_without_wss_transport() {
+    RyuLdnClientConfig cfg;
+    ASSERT_TRUE(cfg.server.transport == config::Transport::None);
+    RyuLdnClient client(cfg);
+    ASSERT_EQ(client.connect(), ClientOpResult::ConnectionFailed);
+    ASSERT_EQ(client.get_state(), ConnectionState::Disconnected);
+    ASSERT_TRUE(!client.is_connected());
+    return true;
+}
+
+/**
  * @brief Test constructor with injected ITcpClient (dependency injection)
  */
 bool test_construction_with_mock() {
@@ -2305,6 +2318,7 @@ int main() {
     printf("\nConstruction:\n");
     RUN_TEST(test_default_construction);
     RUN_TEST(test_construction_with_config);
+    RUN_TEST(test_connect_refused_without_wss_transport);
     RUN_TEST(test_construction_with_mock);
     RUN_TEST(test_multiple_clients);
     RUN_TEST(test_set_config);

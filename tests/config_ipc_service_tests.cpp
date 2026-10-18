@@ -53,6 +53,7 @@
  * | 22 | SetUsePassphrase    | Toggle passphrase filtering        |
  * | 23 | GetPassphrase       | Get room passphrase               |
  * | 24 | SetPassphrase       | Set room passphrase               |
+ * | 25 | GetTransportStatus  | Relay transport status            |
  * @copyright Copyright (c) 2026 ryu_ldn_nx contributors
  * @license GPL-2.0-or-later
  */
@@ -119,6 +120,7 @@ enum class ConfigCmd : u32 {
     SetUsePassphrase    = 22,
     GetPassphrase       = 23,
     SetPassphrase       = 24,
+    GetTransportStatus  = 25,
 };
 
 /**
@@ -157,11 +159,17 @@ static_assert(sizeof(ServerAddressIpc) == 68, "ServerAddressIpc must be 68 bytes
 namespace mock {
 
 /**
+ * @brief Mock relay transport ([server] transport)
+ */
+enum class Transport : uint8_t { None, Wss };
+
+/**
  * @brief Mock server configuration
  */
 struct ServerConfig {
     char host[128];
     u16 port;
+    Transport transport;
 };
 
 /**
@@ -347,6 +355,9 @@ public:
     }
 
     Result SetDisableP2p(u32 disabled) {
+        if (g_mock_config.server.transport == Transport::Wss && disabled == 0) {
+            return 1;  // sf::ResultNotSupported in the real service
+        }
         g_mock_config.ldn.disable_p2p = (disabled != 0);
         R_SUCCEED();
     }
@@ -459,6 +470,9 @@ TEST(command_ids_match_layout) {
     ASSERT_EQ(static_cast<u32>(ConfigCmd::SetUsePassphrase), 22u);
     ASSERT_EQ(static_cast<u32>(ConfigCmd::GetPassphrase), 23u);
     ASSERT_EQ(static_cast<u32>(ConfigCmd::SetPassphrase), 24u);
+
+    // Transport (25)
+    ASSERT_EQ(static_cast<u32>(ConfigCmd::GetTransportStatus), 25u);
 }
 
 /**
@@ -487,11 +501,11 @@ TEST(command_ids_get_set_pairing) {
 }
 
 /**
- * @test Verify total command count is 25 (IDs 0-24)
+ * @test Verify total command count is 26 (IDs 0-25)
  */
-TEST(command_count_is_25) {
-    ASSERT_EQ(static_cast<u32>(ConfigCmd::SetPassphrase), 24u);
-    // Total: 25 defined command IDs (0-24)
+TEST(command_count_is_26) {
+    ASSERT_EQ(static_cast<u32>(ConfigCmd::GetTransportStatus), 25u);
+    // Total: 26 defined command IDs (0-25)
 }
 //=============================================================================
 // Structure Size Tests
@@ -932,6 +946,20 @@ TEST(disable_p2p_set_get_roundtrip) {
     ASSERT_EQ(disabled, 1u);
 }
 
+TEST(disable_p2p_refused_with_wss_transport) {
+    mock::MockConfigService svc;
+    mock::g_mock_config.server.transport = mock::Transport::Wss;
+
+    Result r = svc.SetDisableP2p(0);
+    ASSERT_TRUE(R_FAILED(r));
+    u32 disabled = 0;
+    svc.GetDisableP2p(disabled);
+    ASSERT_EQ(disabled, 1u);
+
+    // Keeping P2P off is still allowed
+    ASSERT_SUCCESS(svc.SetDisableP2p(1));
+}
+
 //=============================================================================
 // Main
 //=============================================================================
@@ -946,7 +974,7 @@ int main() {
     RUN_TEST(command_ids_start_from_zero);
     RUN_TEST(command_ids_match_layout);
     RUN_TEST(command_ids_get_set_pairing);
-    RUN_TEST(command_count_is_25);
+    RUN_TEST(command_count_is_26);
 
     printf("\n--- Structure Size Tests ---\n");
     RUN_TEST(server_address_ipc_size);
@@ -994,6 +1022,7 @@ int main() {
     printf("\n--- Disable P2P Tests ---\n");
     RUN_TEST(disable_p2p_default_true);
     RUN_TEST(disable_p2p_set_get_roundtrip);
+    RUN_TEST(disable_p2p_refused_with_wss_transport);
 
     printf("\n--- Timeout Tests ---\n");
 

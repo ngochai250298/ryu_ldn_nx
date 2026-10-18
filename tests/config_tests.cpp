@@ -104,9 +104,14 @@ private:
 TEST(default_values) {
     Config config = get_default_config();
 
-    // Server defaults
-    ASSERT_STREQ(config.server.host, "ryuldnnx.ddns.net");
-    ASSERT_EQ(config.server.port, 30456);
+    // Server defaults: nothing connects until the relay is configured
+    ASSERT_STREQ(config.server.host, "");
+    ASSERT_EQ(config.server.port, 443);
+    ASSERT_TRUE(config.server.transport == Transport::None);
+    ASSERT_STREQ(config.server.path, "/ldn");
+    ASSERT_STREQ(config.server.console_id, "");
+    ASSERT_STREQ(config.server.token, "");
+    ASSERT_STREQ(config.server.ca_file, "sdmc:/config/ryu_ldn_nx/ca.pem");
 
     // LDN defaults
     ASSERT_EQ(config.ldn.enabled, true);
@@ -134,7 +139,7 @@ TEST(parse_empty_file) {
 
     ASSERT_EQ(result, ConfigResult::Success);
     // Should have defaults
-    ASSERT_STREQ(config.server.host, "ryuldnnx.ddns.net");
+    ASSERT_STREQ(config.server.host, DEFAULT_HOST);
 }
 
 TEST(parse_server_section) {
@@ -254,7 +259,7 @@ TEST(file_not_found) {
 
     ASSERT_EQ(result, ConfigResult::FileNotFound);
     // Config should still have defaults
-    ASSERT_STREQ(config.server.host, "ryuldnnx.ddns.net");
+    ASSERT_STREQ(config.server.host, DEFAULT_HOST);
 }
 
 TEST(passphrase_truncated) {
@@ -432,6 +437,100 @@ TEST(ensure_config_exists_keeps_existing) {
     ASSERT_EQ(loaded.server.port, 54321);
 
     std::remove(path);
+}
+
+// ============================================================================
+// Relay Transport Tests
+// ============================================================================
+
+static const char* VALID_TOKEN = "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef";
+
+TEST(parse_relay_keys) {
+    char content[512];
+    snprintf(content, sizeof(content),
+        "[server]\n"
+        "host = relay.example.workers.dev\n"
+        "transport = wss\n"
+        "path = /ldn\n"
+        "console_id = switch-1\n"
+        "token = %s\n"
+        "ca_file = sdmc:/config/ryu_ldn_nx/ca.pem\n", VALID_TOKEN);
+    TempConfigFile file(content);
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+
+    ASSERT_TRUE(config.server.transport == Transport::Wss);
+    ASSERT_STREQ(config.server.console_id, "switch-1");
+    // Stored lowercase, as the relay compares it
+    ASSERT_STREQ(config.server.token, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+}
+
+TEST(transport_missing_or_unknown_is_none) {
+    TempConfigFile empty("[server]\ntransport =\n");
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(empty.path(), config), ConfigResult::Success);
+    ASSERT_TRUE(config.server.transport == Transport::None);
+
+    TempConfigFile tcp("[server]\ntransport = tcp\n");
+    config = get_default_config();
+    ASSERT_EQ(load_config(tcp.path(), config), ConfigResult::Success);
+    ASSERT_TRUE(config.server.transport == Transport::None);
+}
+
+TEST(token_rejected_unless_64_hex) {
+    const char* bad[] = {
+        "0123456789abcdef",                                                    // too short
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",   // too long
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",    // not hex
+    };
+    for (const char* token : bad) {
+        char content[256];
+        snprintf(content, sizeof(content), "[server]\ntoken = %s\n", token);
+        TempConfigFile file(content);
+        Config config = get_default_config();
+        ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+        ASSERT_STREQ(config.server.token, "");
+    }
+}
+
+TEST(console_id_rejected_unless_relay_charset) {
+    const char* bad[] = {"Switch-1", "switch_1", "0123456789abcdef0123456789abcdef0"};
+    for (const char* id : bad) {
+        char content[256];
+        snprintf(content, sizeof(content), "[server]\nconsole_id = %s\n", id);
+        TempConfigFile file(content);
+        Config config = get_default_config();
+        ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+        ASSERT_STREQ(config.server.console_id, "");
+    }
+}
+
+TEST(wss_transport_forces_p2p_off) {
+    TempConfigFile file("[server]\ntransport = wss\n[ldn]\ndisable_p2p = 0\n");
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+    ASSERT_EQ(config.ldn.disable_p2p, true);
+}
+
+TEST(save_config_keeps_relay_keys) {
+    char content[512];
+    snprintf(content, sizeof(content),
+        "[server]\nhost = relay.example\ntransport = wss\nconsole_id = switch-1\ntoken = %s\n", VALID_TOKEN);
+    TempConfigFile file(content);
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/test_save_relay_%d.ini", rand());
+    ASSERT_EQ(save_config(path, config), ConfigResult::Success);
+    Config loaded = get_default_config();
+    ASSERT_EQ(load_config(path, loaded), ConfigResult::Success);
+    std::remove(path);
+
+    ASSERT_TRUE(loaded.server.transport == Transport::Wss);
+    ASSERT_STREQ(loaded.server.console_id, "switch-1");
+    ASSERT_STREQ(loaded.server.token, config.server.token);
+    ASSERT_EQ(loaded.server.port, config.server.port);
 }
 
 // ============================================================================

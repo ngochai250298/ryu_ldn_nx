@@ -103,6 +103,7 @@ docs/src/content/docs/api/*.mdx
 tests/build/
 tests/*.o
 tests/run_*
+tests/wss_certs/
 tests/*.exe
 
 # Integration test generated docker-compose (derived from submodule)

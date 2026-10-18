@@ -20,6 +20,7 @@
 #include <atomic>
 #include <vector>
 #include <functional>
+#include <memory>
 
 #include "network/socket.hpp"
 #include "network/tcp_client.hpp"
@@ -28,6 +29,12 @@
 
 using namespace ryu_ldn;
 using namespace ryu_ldn::network;
+
+// RyuLdnClient(cfg) builds the transport from [server] transport, which is
+// wss-only; LdnServer here speaks plain TCP, so inject a TcpClient.
+static std::unique_ptr<ITcpClient> plain_tcp() {
+    return std::make_unique<TcpClient>();
+}
 
 // ============================================================================
 // Test framework
@@ -194,7 +201,7 @@ bool test_config_from_default_constructor() {
 
 bool test_config_from_custom_constructor() {
     RyuLdnClientConfig cfg = make_config();
-    RyuLdnClient client(cfg);
+    RyuLdnClient client(cfg, plain_tcp());
     const auto& retrieved = client.get_config();
     ASSERT_TRUE(std::strcmp(cfg.host, g_host) == 0);
     ASSERT_EQ(retrieved.port, g_port);
@@ -202,7 +209,7 @@ bool test_config_from_custom_constructor() {
 }
 
 bool test_set_config_while_disconnected() {
-    RyuLdnClient client;
+    RyuLdnClient client(RyuLdnClientConfig{}, plain_tcp());
     RyuLdnClientConfig new_cfg;
     std::strncpy(new_cfg.host, g_host, sizeof(new_cfg.host) - 1);
     new_cfg.port = g_port;
@@ -219,7 +226,7 @@ bool test_set_config_while_disconnected() {
 
 bool test_config_change_then_connect() {
     socket_init();
-    RyuLdnClient client;
+    RyuLdnClient client(RyuLdnClientConfig{}, plain_tcp());
     RyuLdnClientConfig cfg;
     std::strncpy(cfg.host, g_host, sizeof(cfg.host) - 1);
     cfg.port = g_port;
@@ -238,7 +245,7 @@ bool test_passphrase_config() {
     cfg.port = g_port;
     cfg.connect_timeout_ms = 3000;
     std::strncpy(cfg.passphrase, "Ryujinx-DEADBEEF", sizeof(cfg.passphrase) - 1);
-    RyuLdnClient client(cfg);
+    RyuLdnClient client(cfg, plain_tcp());
 
     // Verify passphrase is stored
     ASSERT_TRUE(std::strcmp(cfg.passphrase, "Ryujinx-DEADBEEF") == 0);
@@ -251,7 +258,7 @@ bool test_passphrase_config() {
 
 bool test_connect_handshake() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ClientOpResult result = client.connect(g_host, g_port);
     ASSERT_EQ(result, ClientOpResult::Success);
     ASSERT_TRUE(wait_until_ready(client, 8000));
@@ -265,7 +272,7 @@ bool test_connect_handshake() {
 
 bool test_connect_parameterless() {
     socket_init();
-    RyuLdnClient client;
+    RyuLdnClient client(RyuLdnClientConfig{}, plain_tcp());
     RyuLdnClientConfig cfg;
     std::strncpy(cfg.host, g_host, sizeof(cfg.host) - 1);
     cfg.port = g_port;
@@ -281,7 +288,7 @@ bool test_connect_parameterless() {
 
 bool test_connect_already_connected() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     ClientOpResult result = client.connect(g_host, g_port);
@@ -296,7 +303,7 @@ bool test_state_transitions_connect() {
     socket_init();
     std::atomic<int> callback_count{0};
 
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     client.set_state_callback(
         [](ConnectionState, ConnectionState, void* user_data) {
             auto* count = static_cast<std::atomic<int>*>(user_data);
@@ -321,7 +328,7 @@ bool test_state_transitions_connect() {
 
 bool test_disconnect_reconnect() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
 
     client.connect(g_host, g_port);
     ASSERT_TRUE(wait_until_ready(client, 8000));
@@ -341,7 +348,7 @@ bool test_disconnect_reconnect() {
 
 bool test_sequential_connect_disconnect_cycles() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
 
     for (int i = 0; i < 3; i++) {
         ClientOpResult result = client.connect(g_host, g_port);
@@ -359,7 +366,7 @@ bool test_sequential_connect_disconnect_cycles() {
 
 bool test_double_disconnect() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     client.disconnect();
@@ -375,9 +382,9 @@ bool test_double_disconnect() {
 bool test_multiple_clients_same_server() {
     socket_init();
 
-    RyuLdnClient c1(make_config());
-    RyuLdnClient c2(make_config());
-    RyuLdnClient c3(make_config());
+    RyuLdnClient c1(make_config(), plain_tcp());
+    RyuLdnClient c2(make_config(), plain_tcp());
+    RyuLdnClient c3(make_config(), plain_tcp());
 
     ASSERT_TRUE(connect_ready(c1));
     ASSERT_TRUE(connect_ready(c2));
@@ -400,7 +407,7 @@ bool test_multiple_clients_same_server() {
 
 bool test_getters_while_connected() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     ASSERT_EQ(client.get_state(), ConnectionState::Ready);
@@ -417,7 +424,7 @@ bool test_getters_while_connected() {
 
 bool test_getters_while_disconnected() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
 
     ASSERT_EQ(client.get_state(), ConnectionState::Disconnected);
     ASSERT_FALSE(client.is_connected());
@@ -432,7 +439,7 @@ bool test_getters_while_disconnected() {
 
 bool test_get_last_rtt_initial() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_EQ(client.get_last_rtt_ms(), 0u);
 
     ASSERT_TRUE(connect_ready(client));
@@ -450,7 +457,7 @@ bool test_get_last_rtt_initial() {
 
 bool test_send_scan() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     ClientOpResult result = client.send_scan(make_scan_filter());
@@ -464,7 +471,7 @@ bool test_send_scan() {
 
 bool test_send_create_access_point() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     auto req = make_ap_request("APHost");
@@ -479,7 +486,7 @@ bool test_send_create_access_point() {
 
 bool test_send_create_access_point_with_advertise() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     auto req = make_ap_request("APAdv");
@@ -496,12 +503,12 @@ bool test_send_create_access_point_with_advertise() {
 bool test_send_connect() {
     socket_init();
 
-    RyuLdnClient host(make_config());
+    RyuLdnClient host(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(host));
     host.send_create_access_point(make_ap_request("HostConn"), nullptr, 0);
     poll_for(host, 2000);
 
-    RyuLdnClient station(make_config());
+    RyuLdnClient station(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(station));
 
     protocol::ConnectRequest connect_req{};
@@ -526,7 +533,7 @@ bool test_send_connect() {
 
 bool test_send_create_access_point_private() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     protocol::CreateAccessPointPrivateRequest req{};
@@ -554,7 +561,7 @@ bool test_send_create_access_point_private() {
 
 bool test_send_connect_private() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     protocol::ConnectPrivateRequest req{};
@@ -578,7 +585,7 @@ bool test_send_connect_private() {
 
 bool test_send_proxy_data() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     protocol::ProxyDataHeader header{};
@@ -601,7 +608,7 @@ bool test_send_proxy_data() {
 
 bool test_send_ping() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     ClientOpResult result = client.send_ping();
@@ -615,7 +622,7 @@ bool test_send_ping() {
 
 bool test_send_ping_response() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     ClientOpResult result = client.send_ping_response(42);
@@ -629,7 +636,7 @@ bool test_send_ping_response() {
 
 bool test_send_disconnect_network() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     ClientOpResult result = client.send_disconnect_network();
@@ -643,7 +650,7 @@ bool test_send_disconnect_network() {
 
 bool test_send_set_accept_policy() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     auto ap_req = make_ap_request("PolicyHost");
@@ -663,7 +670,7 @@ bool test_send_set_accept_policy() {
 
 bool test_send_set_advertise_data() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     auto ap_req = make_ap_request("AdvertiseHost");
@@ -691,7 +698,7 @@ bool test_send_set_advertise_data() {
 
 bool test_send_reject() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     auto ap_req = make_ap_request("RejectHost");
@@ -712,7 +719,7 @@ bool test_send_reject() {
 
 bool test_send_raw_packet() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     // Valid Ping packet in raw format
@@ -740,7 +747,7 @@ bool test_send_raw_packet() {
 
 bool test_send_not_connected() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     // Not connected — all send_* should return NotReady
     ASSERT_EQ(client.send_scan(make_scan_filter()), ClientOpResult::NotReady);
     ASSERT_EQ(client.send_create_access_point(make_ap_request(), nullptr, 0), ClientOpResult::NotReady);
@@ -768,7 +775,7 @@ bool test_state_callback_lifecycle() {
     socket_init();
     std::atomic<int> callback_count{0};
 
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     client.set_state_callback(
         [](ConnectionState /*old_state*/, ConnectionState /*new_state*/, void* user_data) {
             auto* count = static_cast<std::atomic<int>*>(user_data);
@@ -791,7 +798,7 @@ bool test_state_callback_lifecycle() {
 
 bool test_state_callback_null() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
 
     // Setting null callback should not crash
     client.set_state_callback(nullptr, nullptr);
@@ -810,7 +817,7 @@ bool test_packet_callback_receives_data() {
         std::atomic<uint32_t> last_id{0};
     } info;
 
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     client.set_packet_callback(
         [](protocol::PacketId id, const uint8_t*, size_t, void* user_data) {
             auto* i = static_cast<PacketInfo*>(user_data);
@@ -835,7 +842,7 @@ bool test_packet_callback_receives_data() {
 
 bool test_packet_callback_null_no_crash() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     // No packet callback set — packets should be silently dropped
     ASSERT_TRUE(connect_ready(client));
 
@@ -858,7 +865,7 @@ bool test_receive_scan_reply() {
         std::atomic<int> scan_reply_end_count{0};
     } info;
 
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     client.set_packet_callback(
         [](protocol::PacketId id, const uint8_t*, size_t, void* user_data) {
             auto* si = static_cast<ScanInfo*>(user_data);
@@ -886,7 +893,7 @@ bool test_receive_connected_sync_network() {
         std::atomic<bool> got_sync_network{false};
     } info;
 
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     client.set_packet_callback(
         [](protocol::PacketId id, const uint8_t*, size_t, void* user_data) {
             auto* si = static_cast<ServerInfo*>(user_data);
@@ -914,7 +921,7 @@ bool test_server_ping_echo() {
     // The server sends Pings (requester=0), our client echoes them back
     // in handle_packet(). We verify this doesn't crash and the connection stays alive.
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     // Wait long enough for server to send a ping (server pings every ~30s in practice,
@@ -934,14 +941,14 @@ bool test_server_ping_echo() {
 bool test_host_station_full_flow() {
     socket_init();
 
-    RyuLdnClient host(make_config());
+    RyuLdnClient host(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(host));
 
     ClientOpResult host_result = host.send_create_access_point(make_ap_request("FlowHost"), nullptr, 0);
     ASSERT_EQ(host_result, ClientOpResult::Success);
     poll_for(host, 2000);
 
-    RyuLdnClient station(make_config());
+    RyuLdnClient station(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(station));
 
     ClientOpResult scan_result = station.send_scan(make_scan_filter());
@@ -980,13 +987,13 @@ bool test_host_station_full_flow() {
 bool test_three_clients_scan() {
     socket_init();
 
-    RyuLdnClient host(make_config());
+    RyuLdnClient host(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(host));
     host.send_create_access_point(make_ap_request("ThreeHost"), nullptr, 0);
     poll_for(host, 2000);
 
-    RyuLdnClient station1(make_config());
-    RyuLdnClient station2(make_config());
+    RyuLdnClient station1(make_config(), plain_tcp());
+    RyuLdnClient station2(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(station1));
     ASSERT_TRUE(connect_ready(station2));
 
@@ -1010,7 +1017,7 @@ bool test_passphrase_connect() {
     socket_init();
     RyuLdnClientConfig cfg = make_config();
     std::strncpy(cfg.passphrase, "Ryujinx-AA", sizeof(cfg.passphrase) - 1);
-    RyuLdnClient client(cfg);
+    RyuLdnClient client(cfg, plain_tcp());
 
     client.connect(g_host, g_port);
     (void)wait_until_ready(client, 8000);
@@ -1035,7 +1042,7 @@ bool test_connect_to_invalid_port() {
     cfg.port = 19999;  // Unlikely to be listening
     cfg.connect_timeout_ms = 2000;
     cfg.auto_reconnect = false;
-    RyuLdnClient client(cfg);
+    RyuLdnClient client(cfg, plain_tcp());
 
     ClientOpResult result = client.connect(g_host, 19999);
     // Should fail or auto-transition, but not crash
@@ -1049,7 +1056,7 @@ bool test_connect_to_invalid_port() {
 
 bool test_multiple_scan_requests() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     for (int i = 0; i < 5; i++) {
@@ -1065,7 +1072,7 @@ bool test_multiple_scan_requests() {
 
 bool test_move_constructor() {
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
     ASSERT_TRUE(client.is_ready());
 
@@ -1086,10 +1093,10 @@ bool test_move_constructor() {
 
 bool test_move_assignment() {
     socket_init();
-    RyuLdnClient client1(make_config());
+    RyuLdnClient client1(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client1));
 
-    RyuLdnClient client2(make_config());
+    RyuLdnClient client2(make_config(), plain_tcp());
     // Self-move-assignment should be safe
     client2 = std::move(client1);
 
@@ -1194,7 +1201,7 @@ bool test_connection_lost_during_ready() {
     std::atomic<bool> saw_connection_lost{false};
 
     RyuLdnClientConfig cfg = make_config(true);
-    RyuLdnClient client(cfg);
+    RyuLdnClient client(cfg, plain_tcp());
 
     client.set_state_callback(
         [](ConnectionState, ConnectionState new_state, void* user_data) {
@@ -1246,7 +1253,7 @@ bool test_connection_lost_no_auto_reconnect() {
     std::atomic<bool> saw_retrying{false};
 
     RyuLdnClientConfig cfg = make_config(false);
-    RyuLdnClient client(cfg);
+    RyuLdnClient client(cfg, plain_tcp());
 
     client.set_state_callback(
         [](ConnectionState, ConnectionState new_state, void* user_data) {
@@ -1289,7 +1296,7 @@ bool test_connection_lost_no_auto_reconnect() {
 bool test_send_fails_after_server_drop() {
     // Kill server, verify send_* returns SendFailed or client leaves Ready
     socket_init();
-    RyuLdnClient client(make_config());
+    RyuLdnClient client(make_config(), plain_tcp());
     ASSERT_TRUE(connect_ready(client));
 
     ASSERT_TRUE(kill_server());
@@ -1325,7 +1332,7 @@ bool test_try_connect_failure_then_backoff() {
     RyuLdnClientConfig cfg = make_config(true);
     cfg.reconnect.initial_delay_ms = 500;
     cfg.reconnect.max_delay_ms = 2000;
-    RyuLdnClient client(cfg);
+    RyuLdnClient client(cfg, plain_tcp());
 
     client.set_state_callback(
         [](ConnectionState, ConnectionState new_state, void* user_data) {
@@ -1371,7 +1378,7 @@ bool test_backoff_expiry_and_retry() {
     RyuLdnClientConfig cfg = make_config(true);
     cfg.reconnect.initial_delay_ms = 500;
     cfg.reconnect.max_delay_ms = 2000;
-    RyuLdnClient client(cfg);
+    RyuLdnClient client(cfg, plain_tcp());
 
     struct BoffFlags {
         std::atomic<int>& boff;
@@ -1428,7 +1435,7 @@ bool test_server_initiated_disconnect() {
     std::atomic<bool> saw_disconnect_callback{false};
 
     RyuLdnClientConfig cfg = make_config(false);
-    RyuLdnClient client(cfg);
+    RyuLdnClient client(cfg, plain_tcp());
 
     client.set_state_callback(
         [](ConnectionState, ConnectionState new_state, void* user_data) {

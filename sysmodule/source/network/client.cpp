@@ -41,6 +41,7 @@
 
 #include "client.hpp"
 #include "tcp_client.hpp"
+#include "wss_client.hpp"
 #include "../debug/log.hpp"
 #include <cstring>
 #include <memory>
@@ -85,6 +86,7 @@ RyuLdnClientConfig::RyuLdnClientConfig()
     std::strncpy(host, "127.0.0.1", sizeof(host) - 1);
     host[sizeof(host) - 1] = '\0';
     passphrase[0] = '\0';  // Empty passphrase = public rooms
+    std::memset(&server, 0, sizeof(server));  // transport = None: connect() refuses
 }
 
 /**
@@ -110,6 +112,8 @@ RyuLdnClientConfig::RyuLdnClientConfig(const config::Config& cfg)
     std::memset(passphrase, 0, sizeof(passphrase));
     std::memcpy(passphrase, cfg.ldn.passphrase, sizeof(passphrase) - 1);
 
+    server = cfg.server;
+
     // Configure reconnection with hardcoded constants
     reconnect.initial_delay_ms = 1000;  // 1s initial delay
     reconnect.max_delay_ms = 10000;     // 10s max (10x initial)
@@ -117,6 +121,29 @@ RyuLdnClientConfig::RyuLdnClientConfig(const config::Config& cfg)
     reconnect.jitter_percent = 10;
     reconnect.max_retries = 0;  // 0 disables auto-reconnect (see AGENTS.md: "max_reconnect_attempts = 0 disables auto-reconnect entirely")
 }
+
+// ============================================================================
+// Transport Selection
+// ============================================================================
+
+namespace {
+
+/**
+ * @brief Create the transport for a client config
+ *
+ * This fork only speaks wss:// to its relay: `transport = wss` creates a
+ * WssClient; a missing, empty or unknown transport creates none and
+ * connect() refuses. An upstream-shaped variant returns
+ * std::make_unique<TcpClient>() for Transport::None instead.
+ */
+std::unique_ptr<ITcpClient> make_transport(const RyuLdnClientConfig& config) {
+    if (config.server.transport == config::Transport::Wss) {
+        return std::make_unique<WssClient>(config.server);
+    }
+    return nullptr;
+}
+
+} // anonymous namespace
 
 // ============================================================================
 // RyuLdnClient Implementation
@@ -130,7 +157,7 @@ RyuLdnClientConfig::RyuLdnClientConfig(const config::Config& cfg)
  */
 RyuLdnClient::RyuLdnClient()
     : m_config()
-    , m_tcp_client(std::make_unique<TcpClient>())
+    , m_tcp_client(make_transport(m_config))
     , m_state_machine()
     , m_reconnect_manager()
     , m_state_callback(nullptr)
@@ -163,7 +190,7 @@ RyuLdnClient::RyuLdnClient()
  */
 RyuLdnClient::RyuLdnClient(const RyuLdnClientConfig& config)
     : m_config(config)
-    , m_tcp_client(std::make_unique<TcpClient>())
+    , m_tcp_client(make_transport(m_config))
     , m_state_machine()
     , m_reconnect_manager(config.reconnect)
     , m_state_callback(nullptr)
@@ -391,6 +418,13 @@ ClientOpResult RyuLdnClient::connect(const char* host, uint16_t port) {
         m_config.host[sizeof(m_config.host) - 1] = '\0';
     }
     m_config.port = port;
+
+    // No transport means [server] transport is not "wss": plain TCP is not offered
+    if (!m_tcp_client) {
+        LOG_ERROR("Refusing to connect: [server] transport must be wss (plain TCP is disabled)");
+        set_transport_status("Refused: set transport = wss");
+        return ClientOpResult::ConnectionFailed;
+    }
 
     // Initialize socket system if needed
     if (!m_initialized) {

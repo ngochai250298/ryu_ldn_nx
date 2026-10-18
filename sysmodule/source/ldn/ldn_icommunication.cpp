@@ -30,8 +30,11 @@ namespace ams::mitm::ldn {
 static ICommunicationService* g_active_ldn_service = nullptr;
 static os::Mutex g_active_service_mutex{false};
 
-// Background thread stack - allocated statically to avoid bloating class size
-alignas(os::ThreadStackAlignment) static u8 g_background_thread_stack[0x4000];
+// Background thread stack - allocated statically to avoid bloating class size.
+// Reconnects run WssClient::connect (TLS handshake + upgrade) on this thread:
+// measured ~10 KB at the deepest point, up to ~13 KB with the one-time AES
+// table setup and the resolver, so 16 KB left too little headroom.
+alignas(os::ThreadStackAlignment) static u8 g_background_thread_stack[0x6000];
 
 // Async ExternalProxy connect thread stack — see m_p2p_connect_thread comment
 // in the header. The connect+auth+EnsureProxyReady chain takes 1–4 s and used

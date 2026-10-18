@@ -179,6 +179,14 @@ struct RyuLdnClientConfig {
     char passphrase[config::MAX_PASSPHRASE_LENGTH + 1];
 
     /**
+     * @brief [server] section, used to pick and configure the transport
+     *
+     * transport selects WssClient; path, console_id, token and ca_file
+     * configure it. Zeroed (Transport::None) by the default constructor.
+     */
+    config::ServerConfig server;
+
+    /**
      * @brief Default constructor with sensible defaults
      */
     RyuLdnClientConfig();
