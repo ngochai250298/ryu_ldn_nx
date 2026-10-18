@@ -90,6 +90,19 @@ constexpr size_t PROXY_SOCKET_MAX_PAYLOAD = 2000;
 constexpr s64 PROXY_SOCKET_MAX_BLOCK_MS = 1000;
 
 /**
+ * @brief Wake-up for Poll/Select over proxy sockets
+ *
+ * Bumped whenever any proxy socket gets data or a connection, or is shut
+ * down or closed. A waiter reads the sequence, checks its sockets, then
+ * waits for the sequence to change, so no wake-up is lost in between.
+ * The lock behind it is a leaf: nothing else is taken while it is held.
+ */
+uint64_t ProxyActivitySeq();
+void NotifyProxyActivity();
+/// Waits until ProxyActivitySeq() != seen or timeout passes (may wake early).
+void WaitProxyActivity(uint64_t seen, TimeSpan timeout);
+
+/**
  * @brief State of a proxy socket
  */
 enum class ProxySocketState {

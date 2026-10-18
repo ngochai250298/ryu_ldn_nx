@@ -576,6 +576,60 @@ TEST(timeval_to_nanoseconds) {
 }
 
 // ============================================================================
+// Poll/Select wake-up (finding: proxy-only poll ignored its timeout)
+// ============================================================================
+
+namespace {
+s64 MsSince(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+}
+}
+
+TEST(poll_wait_times_out_without_activity) {
+    const auto seq = ams::mitm::bsd::ProxyActivitySeq();
+    const auto t0 = std::chrono::steady_clock::now();
+    ams::mitm::bsd::WaitProxyActivity(seq, ams::TimeSpan::FromMilliSeconds(50));
+    const s64 ms = MsSince(t0);
+    ASSERT_TRUE(ms >= 45 && ms < 1000);
+}
+
+TEST(poll_wait_wakes_on_incoming_data) {
+    auto s = BoundUdp();
+    const auto seq = ams::mitm::bsd::ProxyActivitySeq();
+    std::thread sender([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        s->IncomingData("x", 1, LdnAddr(1));
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    ams::mitm::bsd::WaitProxyActivity(seq, ams::TimeSpan::FromSeconds(2));
+    sender.join();
+    ASSERT_TRUE(MsSince(t0) < 1000);
+    ASSERT_TRUE(s->HasPendingData());
+}
+
+TEST(poll_wait_does_not_miss_activity_before_it_starts) {
+    auto s = BoundUdp();
+    const auto seq = ams::mitm::bsd::ProxyActivitySeq();
+    s->IncomingData("x", 1, LdnAddr(1));  // lands between the check and the wait
+    const auto t0 = std::chrono::steady_clock::now();
+    ams::mitm::bsd::WaitProxyActivity(seq, ams::TimeSpan::FromSeconds(2));
+    ASSERT_TRUE(MsSince(t0) < 100);
+}
+
+TEST(poll_wait_wakes_on_close) {
+    auto s = BoundUdp();
+    const auto seq = ams::mitm::bsd::ProxyActivitySeq();
+    std::thread closer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        static_cast<void>(s->Close());
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    ams::mitm::bsd::WaitProxyActivity(seq, ams::TimeSpan::FromSeconds(2));
+    closer.join();
+    ASSERT_TRUE(MsSince(t0) < 1000);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 

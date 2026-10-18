@@ -16,6 +16,30 @@
 
 namespace ams::mitm::bsd {
 
+namespace {
+os::SdkMutex g_activity_mutex;
+os::SdkConditionVariable g_activity_cv;
+uint64_t g_activity_seq = 0;
+}
+
+uint64_t ProxyActivitySeq() {
+    std::scoped_lock lock(g_activity_mutex);
+    return g_activity_seq;
+}
+
+void NotifyProxyActivity() {
+    std::scoped_lock lock(g_activity_mutex);
+    g_activity_seq++;
+    g_activity_cv.Broadcast();
+}
+
+void WaitProxyActivity(uint64_t seen, TimeSpan timeout) {
+    std::scoped_lock lock(g_activity_mutex);
+    if (g_activity_seq == seen && timeout > TimeSpan(0)) {
+        static_cast<void>(g_activity_cv.TimedWait(g_activity_mutex, timeout));
+    }
+}
+
 // =============================================================================
 // BSD Error Codes (from bsd_types.hpp)
 // =============================================================================
@@ -344,6 +368,7 @@ void ProxySocket::IncomingData(const void* data, size_t len, const ryu_ldn::bsd:
     m_rx_ring.Push(from, data, len);
 
     m_receive_event.Signal();
+    NotifyProxyActivity();
 }
 
 // =============================================================================
@@ -533,6 +558,7 @@ void ProxySocket::IncomingConnection(const ryu_ldn::protocol::ProxyConnectReques
         std::scoped_lock lock(m_queue_mutex);
         m_accept_queue.push_back(std::move(accepted));
         m_accept_event.Signal();
+        NotifyProxyActivity();
     }
 
     // Send ProxyConnectReply back to the peer via ProxySocketManager, after
@@ -585,6 +611,7 @@ Result ProxySocket::Shutdown(ryu_ldn::bsd::ShutdownHow how) {
 
     // Wake any blocked receiver; it sees the shutdown and returns EOF.
     m_receive_event.Signal();
+    NotifyProxyActivity();
 
     R_SUCCEED();
 }
@@ -603,6 +630,7 @@ Result ProxySocket::Close() {
         m_receive_event.Signal();
         m_accept_event.Signal();
         m_connect_event.Signal();
+        NotifyProxyActivity();
     }
 
     // For TCP, send ProxyDisconnect to notify the peer

@@ -93,7 +93,7 @@ bool ProxySocketManager::CloseProxySocket(u64 key) {
     }
 
     if (socket != nullptr) {
-        socket->Close();
+        static_cast<void>(socket->Close());
     }
     return true;
 }
@@ -108,7 +108,7 @@ void ProxySocketManager::CloseAllProxySockets() {
 
     for (auto& [fd, socket] : closing) {
         if (socket != nullptr) {
-            socket->Close();
+            static_cast<void>(socket->Close());
         }
     }
 }

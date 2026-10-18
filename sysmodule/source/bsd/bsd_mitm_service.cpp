@@ -991,6 +991,51 @@ void FdSet(s32 fd, void* fds, size_t size) {
     }
 }
 
+void FdClear(s32 fd, void* fds, size_t size) {
+    const size_t byte = static_cast<size_t>(fd) / 8;
+    if (fds != nullptr && fd >= 0 && byte < size) {
+        static_cast<u8*>(fds)[byte] &= static_cast<u8>(~(1u << (fd % 8)));
+    }
+}
+
+s32 CountFds(const sf::OutAutoSelectBuffer& set, s32 nfds) {
+    s32 n = 0;
+    for (s32 fd = 0; fd < nfds; fd++) {
+        n += FdIsSet(fd, set.GetPointer(), set.GetSize()) ? 1 : 0;
+    }
+    return n;
+}
+
+/// Poll/Select over proxy sockets wait at most this long (<0 = no timeout).
+///
+/// ponytail: same 1 s cap as a blocking proxy recv, so a poll(-1) returns 0
+/// after 1 s rather than holding a server thread; games poll in a loop.
+TimeSpan ProxyWaitLimit(s64 timeout_ns) {
+    const s64 cap_ns = TimeSpan::FromMilliSeconds(PROXY_SOCKET_MAX_BLOCK_MS).GetNanoSeconds();
+    return TimeSpan::FromNanoSeconds(timeout_ns < 0 ? cap_ns : std::min(timeout_ns, cap_ns));
+}
+
+/// A mixed real+proxy set calls the real poll/select in slices this long,
+/// re-checking the proxies in between.
+///
+/// ponytail: proxy data arriving mid-slice waits for the slice to end
+/// (up to 20 ms latency, ~50 IPCs/s while idle); a real wake-up would need
+/// the proxies to signal the real service, which isn't possible.
+constexpr s64 MIXED_SLICE_MS = 20;
+
+TimeSpan Now() {
+    return os::GetSystemTick().ToTimeSpan();
+}
+
+/// The next real-call timeout in ms: 0 if something is already ready.
+s64 SliceMs(s32 ready, TimeSpan deadline) {
+    if (ready > 0) {
+        return 0;
+    }
+    const s64 left_ms = (deadline - Now()).GetMilliSeconds();
+    return std::clamp<s64>(left_ms, 0, MIXED_SLICE_MS);
+}
+
 /// Proxy readiness for select(); returns the number of bits set.
 s32 SelectProxies(u32 session_id, s32 nfds,
                   const sf::InAutoSelectBuffer& rd_in, const sf::InAutoSelectBuffer& wr_in, const sf::InAutoSelectBuffer& er_in,
@@ -1006,6 +1051,12 @@ s32 SelectProxies(u32 session_id, s32 nfds,
         }
         bool gone;
         auto proxy = LookupProxy(rb::SocketKey(session_id, fd), &gone);
+        if (gone || proxy != nullptr) {
+            // The real select doesn't know proxies; drop what it said.
+            FdClear(fd, rd_out.GetPointer(), rd_out.GetSize());
+            FdClear(fd, wr_out.GetPointer(), wr_out.GetSize());
+            FdClear(fd, er_out.GetPointer(), er_out.GetSize());
+        }
         if (gone) {
             // Session ended: report readable + error so the game's next call
             // gets ENETDOWN instead of waiting.
@@ -1088,47 +1139,61 @@ Result BsdMitmService::Select(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
         }
     }
 
-    bool has_proxy = false;
-    bool has_real = false;
-    const s32 ready = SelectProxies(m_session_id, nfds, readfds_in, writefds_in, errorfds_in,
-                                    readfds_out, writefds_out, errorfds_out, &has_proxy, &has_real);
-    if (!has_proxy) {
-        R_RETURN(ForwardToRealService());
-    }
-    if (!has_real || ready > 0) {
-        R_RETURN(Reply(out_ret, out_errno, ready));
-    }
+    const s64 timeout_ns = timeout.is_null ? -1 : rb::TimevalToNanoseconds({ timeout.tv_sec, timeout.tv_usec });
+    const TimeSpan deadline = Now() + ProxyWaitLimit(timeout_ns);
+    for (bool first = true; ; first = false) {
+        const u64 seq = ProxyActivitySeq();
+        bool has_proxy = false;
+        bool has_real = false;
+        s32 ready = SelectProxies(m_session_id, nfds, readfds_in, writefds_in, errorfds_in,
+                                  readfds_out, writefds_out, errorfds_out, &has_proxy, &has_real);
+        if (first && !has_proxy) {
+            R_RETURN(ForwardToRealService());
+        }
 
-    const struct { s32 nfds; u32 pad; rb::SelectTimeval timeout; } in = { nfds, 0, timeout };
-    rb::BsdReply out{};
-    R_TRY(serviceMitmDispatchInOut(
-        m_forward_service.get(), 5, in, out,
-        .buffer_attrs = {
-            SfBufferAttr_In | SfBufferAttr_HipcAutoSelect,
-            SfBufferAttr_In | SfBufferAttr_HipcAutoSelect,
-            SfBufferAttr_In | SfBufferAttr_HipcAutoSelect,
-            SfBufferAttr_Out | SfBufferAttr_HipcAutoSelect,
-            SfBufferAttr_Out | SfBufferAttr_HipcAutoSelect,
-            SfBufferAttr_Out | SfBufferAttr_HipcAutoSelect,
-        },
-        .buffers = {
-            { readfds_in.GetPointer(), readfds_in.GetSize() },
-            { writefds_in.GetPointer(), writefds_in.GetSize() },
-            { errorfds_in.GetPointer(), errorfds_in.GetSize() },
-            { readfds_out.GetPointer(), readfds_out.GetSize() },
-            { writefds_out.GetPointer(), writefds_out.GetSize() },
-            { errorfds_out.GetPointer(), errorfds_out.GetSize() },
-        },
-    ));
-    if (out.ret < 0) {
-        out_ret.SetValue(out.ret);
-        out_errno.SetValue(out.errno_);
-        R_SUCCEED();
+        if (has_real) {
+            const s64 slice_ms = SliceMs(ready, deadline);
+            const struct { s32 nfds; u32 pad; rb::SelectTimeval timeout; } in = {
+                nfds, 0, { slice_ms / 1000, (slice_ms % 1000) * 1000, false } };
+            rb::BsdReply out{};
+            R_TRY(serviceMitmDispatchInOut(
+                m_forward_service.get(), 5, in, out,
+                .buffer_attrs = {
+                    SfBufferAttr_In | SfBufferAttr_HipcAutoSelect,
+                    SfBufferAttr_In | SfBufferAttr_HipcAutoSelect,
+                    SfBufferAttr_In | SfBufferAttr_HipcAutoSelect,
+                    SfBufferAttr_Out | SfBufferAttr_HipcAutoSelect,
+                    SfBufferAttr_Out | SfBufferAttr_HipcAutoSelect,
+                    SfBufferAttr_Out | SfBufferAttr_HipcAutoSelect,
+                },
+                .buffers = {
+                    { readfds_in.GetPointer(), readfds_in.GetSize() },
+                    { writefds_in.GetPointer(), writefds_in.GetSize() },
+                    { errorfds_in.GetPointer(), errorfds_in.GetSize() },
+                    { readfds_out.GetPointer(), readfds_out.GetSize() },
+                    { writefds_out.GetPointer(), writefds_out.GetSize() },
+                    { errorfds_out.GetPointer(), errorfds_out.GetSize() },
+                },
+            ));
+            if (out.ret < 0) {
+                out_ret.SetValue(out.ret);
+                out_errno.SetValue(out.errno_);
+                R_SUCCEED();
+            }
+            // The real select rewrote every set: put the proxies back and
+            // count each set bit once.
+            SelectProxies(m_session_id, nfds, readfds_in, writefds_in, errorfds_in,
+                          readfds_out, writefds_out, errorfds_out, &has_proxy, &has_real);
+            ready = CountFds(readfds_out, nfds) + CountFds(writefds_out, nfds) + CountFds(errorfds_out, nfds);
+        }
+
+        if (ready > 0 || Now() >= deadline) {
+            R_RETURN(Reply(out_ret, out_errno, ready));
+        }
+        if (!has_real) {
+            WaitProxyActivity(seq, deadline - Now());
+        }
     }
-    has_proxy = has_real = false;
-    const s32 proxy_ready = SelectProxies(m_session_id, nfds, readfds_in, writefds_in, errorfds_in,
-                                          readfds_out, writefds_out, errorfds_out, &has_proxy, &has_real);
-    R_RETURN(Reply(out_ret, out_errno, out.ret + proxy_ready));
 }
 
 Result BsdMitmService::Poll(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
@@ -1144,37 +1209,52 @@ Result BsdMitmService::Poll(sf::Out<s32> out_ret, sf::Out<s32> out_errno,
     }
     auto* poll_fds = reinterpret_cast<rb::PollFd*>(fds_out.GetPointer());
 
-    bool has_proxy = false;
-    bool has_real = false;
-    const s32 ready = PollProxies(m_session_id, poll_fds, count, &has_proxy, &has_real);
-    if (!has_proxy) {
-        R_RETURN(ForwardToRealService());
-    }
-    if (!has_real || ready > 0) {
-        R_RETURN(Reply(out_ret, out_errno, ready));
-    }
+    const s64 timeout_ns = timeout < 0 ? -1 : TimeSpan::FromMilliSeconds(timeout).GetNanoSeconds();
+    const TimeSpan deadline = Now() + ProxyWaitLimit(timeout_ns);
+    for (bool first = true; ; first = false) {
+        const u64 seq = ProxyActivitySeq();
+        bool has_proxy = false;
+        bool has_real = false;
+        s32 ready = PollProxies(m_session_id, poll_fds, count, &has_proxy, &has_real);
+        if (first && !has_proxy) {
+            R_RETURN(ForwardToRealService());
+        }
 
-    const struct { s32 nfds; s32 timeout; } in = { nfds, timeout };
-    rb::BsdReply out{};
-    R_TRY(serviceMitmDispatchInOut(
-        m_forward_service.get(), 6, in, out,
-        .buffer_attrs = {
-            SfBufferAttr_In | SfBufferAttr_HipcAutoSelect,
-            SfBufferAttr_Out | SfBufferAttr_HipcAutoSelect,
-        },
-        .buffers = {
-            { fds_in.GetPointer(), fds_in.GetSize() },
-            { fds_out.GetPointer(), fds_out.GetSize() },
-        },
-    ));
-    if (out.ret < 0) {
-        out_ret.SetValue(out.ret);
-        out_errno.SetValue(out.errno_);
-        R_SUCCEED();
+        if (has_real) {
+            const struct { s32 nfds; s32 timeout; } in = { nfds, static_cast<s32>(SliceMs(ready, deadline)) };
+            rb::BsdReply out{};
+            R_TRY(serviceMitmDispatchInOut(
+                m_forward_service.get(), 6, in, out,
+                .buffer_attrs = {
+                    SfBufferAttr_In | SfBufferAttr_HipcAutoSelect,
+                    SfBufferAttr_Out | SfBufferAttr_HipcAutoSelect,
+                },
+                .buffers = {
+                    { fds_in.GetPointer(), fds_in.GetSize() },
+                    { fds_out.GetPointer(), fds_out.GetSize() },
+                },
+            ));
+            if (out.ret < 0) {
+                out_ret.SetValue(out.ret);
+                out_errno.SetValue(out.errno_);
+                R_SUCCEED();
+            }
+            // The real poll rewrote every revents: put the proxies back and
+            // count each ready entry once.
+            PollProxies(m_session_id, poll_fds, count, &has_proxy, &has_real);
+            ready = 0;
+            for (size_t i = 0; i < count; i++) {
+                ready += poll_fds[i].revents != 0 ? 1 : 0;
+            }
+        }
+
+        if (ready > 0 || Now() >= deadline) {
+            R_RETURN(Reply(out_ret, out_errno, ready));
+        }
+        if (!has_real) {
+            WaitProxyActivity(seq, deadline - Now());
+        }
     }
-    has_proxy = has_real = false;
-    const s32 proxy_ready = PollProxies(m_session_id, poll_fds, count, &has_proxy, &has_real);
-    R_RETURN(Reply(out_ret, out_errno, out.ret + proxy_ready));
 }
 
 // =============================================================================
