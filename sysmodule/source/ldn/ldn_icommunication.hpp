@@ -715,6 +715,10 @@ public:
         const ryu_ldn::protocol::ProxyDataHeader& header,
         const void* data,
         size_t data_len);
+
+    /// bsd:u sends using this instance outside g_active_service_mutex; taken
+    /// under that mutex, and the destructor waits for it to reach zero.
+    std::atomic<u32> m_proxy_sends_in_flight{0};
 };
 
 // Verify interface compliance

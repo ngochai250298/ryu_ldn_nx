@@ -574,9 +574,11 @@ void P2pProxyServer::Stop() {
         // Closing the socket will cause accept() to return with an error,
         // allowing the thread to check m_running and exit cleanly.
 
+        // Shut down only: the accept thread still polls m_listen_fd, and a
+        // closed fd number can be reused by another socket. It is closed
+        // after the thread is joined below.
         if (m_listen_fd >= 0) {
-            close(m_listen_fd);
-            m_listen_fd = -1;
+            shutdown(m_listen_fd, SHUT_RDWR);
         }
 
         // =====================================================================
@@ -619,6 +621,13 @@ void P2pProxyServer::Stop() {
     os::WaitThread(&m_accept_thread);
     os::DestroyThread(&m_accept_thread);
     g_p2p_accept_stack_in_use.clear();
+    {
+        std::scoped_lock lock(m_mutex);
+        if (m_listen_fd >= 0) {
+            close(m_listen_fd);
+            m_listen_fd = -1;
+        }
+    }
 
     // Every session is now in m_zombie_sessions. Join all of them so no
     // recv thread outlives the server object, then free them and their
@@ -1713,7 +1722,9 @@ void P2pProxyServer::ReapZombieSessions(bool wait_all) {
         std::scoped_lock lock(m_mutex);
         int kept = 0;
         for (int i = 0; i < m_zombie_session_count; ++i) {
-            P2pProxySession* z = m_zombie_sessions[i].get();
+            // release(), not get(): the slot must stop owning z, or the
+            // resets below delete it here, before its thread is joined.
+            P2pProxySession* z = m_zombie_sessions[i].release();
             if (z != nullptr && (wait_all || z->m_thread_done.load(std::memory_order_acquire))) {
                 zombies[taken++] = z;
             } else {
@@ -1745,7 +1756,8 @@ void P2pProxyServer::HandleExternalProxyStateChange(uint32_t virtual_ip, bool co
         return;
     }
 
-    std::scoped_lock lock(m_mutex);
+    std::unique_lock lock(m_mutex);
+    uint32_t notify_ip = 0;
 
     // Drop any waiting token for this vIP so a stale slot in
     // m_waiting_tokens doesn't block future joiners (mirrors
@@ -1777,17 +1789,31 @@ void P2pProxyServer::HandleExternalProxyStateChange(uint32_t virtual_ip, bool co
             LOG_INFO("ExternalProxyState: disconnecting session vIP 0x%08X (master said connected=false)",
                      virtual_ip);
             s->Disconnect(true);
-            RetireSessionLocked(s, true);
+            if (uint32_t ip = RetireSessionLocked(s, true)) {
+                notify_ip = ip;
+            }
         }
+    }
+    lock.unlock();
+    // Outside m_mutex: the master-link send can block for seconds.
+    if (notify_ip != 0) {
+        NotifyMasterDisconnect(notify_ip);
     }
 }
 
 void P2pProxyServer::OnSessionDisconnected(P2pProxySession* session) {
-    std::scoped_lock lock(m_mutex);
-    RetireSessionLocked(session, true);
+    uint32_t notify_ip;
+    {
+        std::scoped_lock lock(m_mutex);
+        notify_ip = RetireSessionLocked(session, true);
+    }
+    // Outside m_mutex: the master-link send can block for seconds.
+    if (notify_ip != 0) {
+        NotifyMasterDisconnect(notify_ip);
+    }
 }
 
-void P2pProxyServer::RetireSessionLocked(P2pProxySession* session, bool notify_master) {
+uint32_t P2pProxyServer::RetireSessionLocked(P2pProxySession* session, bool notify_master) {
     bool found = false;
     for (int i = 0; i < MAX_PLAYERS && !found; i++) {
         if (m_sessions[i].get() == session) {
@@ -1806,12 +1832,11 @@ void P2pProxyServer::RetireSessionLocked(P2pProxySession* session, bool notify_m
         }
     }
     if (!found) {
-        return;  // Already retired
+        return 0;  // Already retired
     }
 
-    if (notify_master && session->IsAuthenticated()) {
-        NotifyMasterDisconnect(session->GetVirtualIpAddress());
-    }
+    const uint32_t notify_ip = (notify_master && session->IsAuthenticated())
+                                   ? session->GetVirtualIpAddress() : 0;
 
     // Queue the session for deletion. We can't delete it here because we
     // are typically called from the session's own recv thread (Disconnect →
@@ -1827,6 +1852,7 @@ void P2pProxyServer::RetireSessionLocked(P2pProxySession* session, bool notify_m
         LOG_ERROR("Zombie session pool full (%d), dropping pointer — heap will leak",
                   MAX_ZOMBIE_SESSIONS);
     }
+    return notify_ip;
 }
 
 /**

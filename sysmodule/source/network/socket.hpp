@@ -129,6 +129,15 @@ public:
     void close();
 
     /**
+     * @brief Shut both directions down but keep the descriptor
+     *
+     * Wakes a poll()/recv() blocked on the socket in another thread without
+     * freeing the fd number under it. Counts as disconnected; close() or
+     * the next connect() releases the descriptor.
+     */
+    void shutdown();
+
+    /**
      * @brief Check if socket is connected
      * @return true if connected
      */

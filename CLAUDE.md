@@ -69,7 +69,11 @@ Games on Switch use Nintendo's PIA library on top of LDN for peer-to-peer mesh n
 
 ### Packet signaling in WaitForResponse
 
-`HandleServerPacket` signals `m_response_event` **only** for actual response packets that `WaitForResponse` expects: `Connected`, `ScanReply`, `ScanReplyEnd`, `RejectReply`, `ProxyConnectReply`, `NetworkError`. Async packets (`ProxyConfig`, `ProxyData`, `ExternalProxy`, `SyncNetwork`, `Ping`) do **not** signal the event. This prevents spurious wake-ups that previously caused false timeout errors.
+`HandleServerPacket` signals `m_response_event` **only** for actual response packets that `WaitForResponse` expects: `Connected`, `ScanReply`, `ScanReplyEnd`, `RejectReply`, `ProxyConnectReply`, `NetworkError`. Async packets (`ProxyConfig`, `ProxyData`, `ExternalProxy`, `ExternalProxyToken`, `ExternalProxyState`, `SyncNetwork`, `Ping`) do **not** signal the event. This prevents spurious wake-ups that previously caused false timeout errors.
+
+Exception: a `NetworkError` whose wire code is 1 (upstream `PortUnreachable`) is not a reply. It only clears `m_use_p2p_proxy`, signals neither `m_response_event` nor `m_error_event`, and wakes no waiting request; the server sends `Connected` next, as in Ryujinx. Every other `NetworkError` sets `m_last_network_error` and signals `m_error_event` so the waiting request fails fast.
+
+`HandleServerPacket` and the state callback run on the receive thread inside `RyuLdnClient::update()`, holding its connection mutex. They must never call `connect`/`disconnect`/`update`/`set_config` or take `g_active_service_mutex`.
 
 ### Key cross-cutting modules
 
@@ -83,7 +87,7 @@ Games on Switch use Nintendo's PIA library on top of LDN for peer-to-peer mesh n
 
 ### Byte order — critical invariant
 
-LDN IPs in `NetworkInfo`, `ProxyConfig`, `m_ipv4_address`, and `GetIpv4Address()` are all in **Ryujinx format** — big-endian read as `uint32` (e.g., `10.114.0.1` = `0x0A720001`). BSD `sockaddr_in.sin_addr` uses **network byte order**. `GetAddr()` does `bswap32`, `sin_addr` is stored in Ryujinx format (no bswap in `Bind`). Never double-convert.
+LDN IPs in `NetworkInfo`, `ProxyConfig`, `ProxyDataHeader`, `m_ipv4_address`, `GetIpv4Address()` and `ProxySocketManager::GetLocalIp()` are all in **Ryujinx format**: big-endian read as `uint32` (e.g., `10.114.0.1` = `0x0A720001`). `SockAddrIn::sin_addr` is in **network byte order everywhere**, in what the game passes and in everything the sysmodule stores or returns. `SockAddrIn::GetAddr()` / `GetPort()` `bswap` it into Ryujinx format; going the other way (filling a `SockAddrIn` from a Ryujinx-format IP, as `Bind` to `INADDR_ANY` and `RouteIncomingData` do) needs an explicit `__builtin_bswap32`. Compare Ryujinx format with Ryujinx format only, and never double-convert.
 
 ### Tesla overlay
 

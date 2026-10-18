@@ -711,6 +711,13 @@ void Socket::close() {
     m_connected = false;
 }
 
+void Socket::shutdown() {
+    if (m_fd >= 0) {
+        ::shutdown(m_fd, SHUT_RDWR);
+    }
+    m_connected = false;  // connect() may reconnect; it closes the old fd
+}
+
 /**
  * @brief Check if socket is connected
  *

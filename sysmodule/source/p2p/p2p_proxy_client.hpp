@@ -92,6 +92,11 @@ public:
     /** @brief Connection timeout (milliseconds) */
     static constexpr int CONNECT_TIMEOUT_MS = 5000;
 
+    /// Cap on one blocking send() to the host. Sends run under m_mutex (and
+    /// the caller's m_p2p_mutex); without a cap a host that stops reading
+    /// blocks Disconnect() forever. Same 5 s bound as the master link.
+    static constexpr int SEND_TIMEOUT_MS = 5000;
+
     // =========================================================================
     // Lifecycle
     // =========================================================================
@@ -259,6 +264,10 @@ private:
     // =========================================================================
     // Internal Methods
     // =========================================================================
+
+    /// send() the whole buffer; m_mutex held. A short or timed-out send
+    /// leaves the stream mid-frame, so it shuts the socket down.
+    bool SendLocked(const void* data, size_t size);
 
     /**
      * @brief Receive loop thread function

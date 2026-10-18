@@ -709,3 +709,32 @@ clean-dns-wrap:
 all: $(TARGET_DNS_WRAP)
 test: test-dns-wrap
 clean: clean-dns-wrap
+
+# Real p2p/ proxy sources against tests/host_shim (C++20 for constinit)
+TARGET_P2P_LOCK := run_p2p_lock_tests
+P2P_LOCK_CXXFLAGS := $(CXXFLAGS) -std=c++20 -Ihost_shim -pthread
+
+$(TARGET_P2P_LOCK): p2p_lock_tests.o p2p_client_real.o p2p_server_real.o log.o config.o
+	$(CXX) $(LDFLAGS) -pthread -o $@ $^
+
+p2p_lock_tests.o: p2p_lock_tests.cpp host_shim/stratosphere.hpp
+	$(CXX) $(P2P_LOCK_CXXFLAGS) -c -o $@ $<
+
+p2p_client_real.o: ../sysmodule/source/p2p/p2p_proxy_client.cpp host_shim/stratosphere.hpp
+	$(CXX) $(P2P_LOCK_CXXFLAGS) -c -o $@ $<
+
+p2p_server_real.o: ../sysmodule/source/p2p/p2p_proxy_server.cpp host_shim/stratosphere.hpp
+	$(CXX) $(P2P_LOCK_CXXFLAGS) -c -o $@ $<
+
+.PHONY: test-p2p-lock clean-p2p-lock
+test-p2p-lock: $(TARGET_P2P_LOCK)
+	@echo ""
+	@echo "=== Running P2P Lock Tests ==="
+	./$(TARGET_P2P_LOCK)
+
+clean-p2p-lock:
+	rm -f $(TARGET_P2P_LOCK)
+
+all: $(TARGET_P2P_LOCK)
+test: test-p2p-lock
+clean: clean-p2p-lock
