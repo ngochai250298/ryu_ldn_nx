@@ -45,6 +45,7 @@
 #include <stratosphere.hpp>
 #include "../protocol/types.hpp"
 #include "../protocol/ryu_protocol.hpp"
+#include "p2p_frame.hpp"
 
 namespace ams::mitm::p2p {
 
@@ -275,8 +276,7 @@ private:
     /// @gdb{tag="P2P:MSG", msg="Client handling proxy config"}
     void HandleProxyConfig(const ryu_ldn::protocol::ProxyConfig& config);
     /// @gdb{tag="P2P:MSG", msg="Client handling proxy data"}
-    void HandleProxyData(const ryu_ldn::protocol::ProxyDataHeader& header,
-                         const uint8_t* data, size_t data_len);
+    void HandleProxyData(const uint8_t* payload, size_t size);
     /// @gdb{tag="P2P:MSG", msg="Client handling proxy connect"}
     void HandleProxyConnect(const ryu_ldn::protocol::ProxyConnectRequest& request);
     /// @gdb{tag="P2P:MSG", msg="Client handling connect reply"}
@@ -315,6 +315,10 @@ private:
     // Receive buffer
     static constexpr size_t RECV_BUFFER_SIZE = 0x10000;
     uint8_t m_recv_buffer[RECV_BUFFER_SIZE];
+
+    // Encode buffer for SendProxyData, guarded by m_mutex. Keeps the frame
+    // off the caller's (MITM) stack.
+    uint8_t m_send_buffer[P2P_MAX_FRAME_SIZE];
 
     // Packet callback
     ProxyPacketCallback m_packet_callback;

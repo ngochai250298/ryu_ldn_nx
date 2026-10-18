@@ -515,12 +515,24 @@ bool P2pProxyClient::Send(const void* data, size_t size) {
  */
 bool P2pProxyClient::SendProxyData(const ryu_ldn::protocol::ProxyDataHeader& header,
                                     const uint8_t* data, size_t data_len) {
-    uint8_t packet[0x10000];  // 64KB max
+    std::scoped_lock lock(m_mutex);
+
+    if (!m_connected || m_socket_fd < 0) {
+        return false;
+    }
+
     size_t len = 0;
-    ryu_ldn::protocol::encode_with_data(packet, sizeof(packet),
-                                        ryu_ldn::protocol::PacketId::ProxyData,
-                                        header, data, data_len, len);
-    return Send(packet, len);
+    if (ryu_ldn::protocol::encode_with_data(m_send_buffer, sizeof(m_send_buffer),
+                                            ryu_ldn::protocol::PacketId::ProxyData,
+                                            header, data, data_len, len)
+            != ryu_ldn::protocol::EncodeResult::Success) {
+        LOG_WARN("P2P client: ProxyData too large (%zu B, max %zu)",
+                 data_len, P2P_MAX_PROXY_PAYLOAD);
+        return false;
+    }
+
+    ssize_t sent = send(m_socket_fd, m_send_buffer, len, 0);
+    return sent >= 0 && static_cast<size_t>(sent) == len;
 }
 
 /**
@@ -655,11 +667,7 @@ void P2pProxyClient::ProcessData(const uint8_t* data, size_t size) {
 
             case ryu_ldn::protocol::PacketId::ProxyData: {
                 if (static_cast<size_t>(header->data_size) >= sizeof(ryu_ldn::protocol::ProxyDataHeader)) {
-                    const auto* pheader = reinterpret_cast<const ryu_ldn::protocol::ProxyDataHeader*>(packet_data);
-                    const uint8_t* payload = packet_data + sizeof(ryu_ldn::protocol::ProxyDataHeader);
-                    size_t payload_len = static_cast<size_t>(header->data_size) -
-                                         sizeof(ryu_ldn::protocol::ProxyDataHeader);
-                    HandleProxyData(*pheader, payload, payload_len);
+                    HandleProxyData(packet_data, static_cast<size_t>(header->data_size));
                 }
                 break;
             }
@@ -734,21 +742,16 @@ void P2pProxyClient::HandleProxyConfig(const ryu_ldn::protocol::ProxyConfig& con
 /**
  * @brief Handle ProxyData from host
  *
- * Forward to the BSD MITM layer via callback.
+ * Forward to the BSD MITM layer via callback. @p payload is the frame
+ * payload as received (ProxyDataHeader followed by the data), which is
+ * already the layout the callback expects, so it is passed through without
+ * a copy.
  */
-void P2pProxyClient::HandleProxyData(const ryu_ldn::protocol::ProxyDataHeader& header,
-                                      const uint8_t* data, size_t data_len) {
-    LOG_VERBOSE("P2P client: received ProxyData (%zu bytes)", data_len);
+void P2pProxyClient::HandleProxyData(const uint8_t* payload, size_t size) {
+    LOG_VERBOSE("P2P client: received ProxyData (%zu bytes)", size);
 
     if (m_packet_callback) {
-        // Create combined buffer for callback
-        size_t total_size = sizeof(header) + data_len;
-        uint8_t buffer[0x10000];
-        if (total_size <= sizeof(buffer)) {
-            std::memcpy(buffer, &header, sizeof(header));
-            std::memcpy(buffer + sizeof(header), data, data_len);
-            m_packet_callback(ryu_ldn::protocol::PacketId::ProxyData, buffer, total_size);
-        }
+        m_packet_callback(ryu_ldn::protocol::PacketId::ProxyData, payload, size);
     }
 }
 

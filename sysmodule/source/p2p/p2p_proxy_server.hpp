@@ -50,6 +50,7 @@
 #include "../protocol/types.hpp"
 #include "../protocol/ryu_protocol.hpp"
 #include "upnp_port_mapper.hpp"
+#include "p2p_frame.hpp"
 
 namespace ams::mitm::p2p {
 
@@ -445,6 +446,12 @@ private:
     uint32_t m_host_virtual_ip;
     HostProxyDataCallback m_host_data_callback;
     void* m_host_data_user_data;
+
+    // Encode buffer for routed and host-originated ProxyData. Guarded by
+    // m_mutex: RouteMessage and BroadcastFromHost both hold it while they
+    // encode and send. Keeps 2 KB frames off the 16 KB session stacks and
+    // the 32 KB MITM stack.
+    uint8_t m_send_buffer[P2P_MAX_FRAME_SIZE];
 };
 
 /**

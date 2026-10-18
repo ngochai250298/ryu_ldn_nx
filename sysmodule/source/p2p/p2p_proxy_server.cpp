@@ -1165,10 +1165,9 @@ bool P2pProxyServer::BroadcastFromHost(ryu_ldn::protocol::ProxyDataHeader& heade
 
     const bool is_broadcast = (dest_ip == m_broadcast_address);
 
-    uint8_t packet[0x10000];
     size_t encoded = 0;
     auto enc = ryu_ldn::protocol::encode_with_data(
-        packet, sizeof(packet),
+        m_send_buffer, sizeof(m_send_buffer),
         ryu_ldn::protocol::PacketId::ProxyData,
         header, data, data_len, encoded);
     if (enc != ryu_ldn::protocol::EncodeResult::Success) {
@@ -1180,7 +1179,7 @@ bool P2pProxyServer::BroadcastFromHost(ryu_ldn::protocol::ProxyDataHeader& heade
     if (is_broadcast) {
         for (int i = 0; i < MAX_PLAYERS; i++) {
             if (m_sessions[i] != nullptr && m_sessions[i]->IsAuthenticated()) {
-                if (m_sessions[i]->Send(packet, encoded)) {
+                if (m_sessions[i]->Send(m_send_buffer, encoded)) {
                     any_sent = true;
                 }
             }
@@ -1190,7 +1189,7 @@ bool P2pProxyServer::BroadcastFromHost(ryu_ldn::protocol::ProxyDataHeader& heade
             if (m_sessions[i] != nullptr &&
                 m_sessions[i]->IsAuthenticated() &&
                 m_sessions[i]->GetVirtualIpAddress() == dest_ip) {
-                any_sent = m_sessions[i]->Send(packet, encoded);
+                any_sent = m_sessions[i]->Send(m_send_buffer, encoded);
                 break;
             }
         }
@@ -1472,19 +1471,25 @@ void P2pProxyServer::HandleProxyData(P2pProxySession* sender,
              static_cast<unsigned>(header.info.protocol), data_len);
     ryu_ldn::debug::g_logger.flush();
 
+    // RouteMessage holds m_mutex while it calls the lambda, which is what
+    // makes m_send_buffer safe to use here. Encode once, on the first target,
+    // after RouteMessage has canonicalised header.info.
+    size_t len = 0;
     RouteMessage(sender, header.info, [&](P2pProxySession* target) {
         LOG_INFO("HandleProxyData ROUTE: sender_vIP=0x%08X -> target_vIP=0x%08X (target=%p)",
                  sender->GetVirtualIpAddress(),
                  target ? target->GetVirtualIpAddress() : 0,
                  static_cast<void*>(target));
         ryu_ldn::debug::g_logger.flush();
-        // Encode and send to target
-        uint8_t packet[0x10000];  // 64KB max packet
-        size_t len = 0;
-        ryu_ldn::protocol::encode_with_data(packet, sizeof(packet),
-                                            ryu_ldn::protocol::PacketId::ProxyData,
-                                            header, data, data_len, len);
-        target->Send(packet, len);
+        if (len == 0 &&
+            ryu_ldn::protocol::encode_with_data(m_send_buffer, sizeof(m_send_buffer),
+                                                ryu_ldn::protocol::PacketId::ProxyData,
+                                                header, data, data_len, len)
+                != ryu_ldn::protocol::EncodeResult::Success) {
+            LOG_WARN("HandleProxyData: payload too large to forward (%zu B)", data_len);
+            return;
+        }
+        target->Send(m_send_buffer, len);
     });
 
     // After RouteMessage canonicalises source_ipv4 / dest_ipv4 the header
