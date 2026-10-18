@@ -1,0 +1,6 @@
+# Fork: build against Atmosphere 1.12.1. Build the image once with
+#   docker build -t ryu_ldn_nx:ams-1.12.1 .
+services:
+  build: { image: "ryu_ldn_nx:ams-1.12.1", pull_policy: never }
+  test:  { image: "ryu_ldn_nx:ams-1.12.1", pull_policy: never }
+  clean: { image: "ryu_ldn_nx:ams-1.12.1", pull_policy: never }
