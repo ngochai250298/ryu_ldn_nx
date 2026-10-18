@@ -52,6 +52,9 @@ enum class ConfigCmd : u32 {
     SetUsePassphrase    = 22,  ///< Toggle passphrase filtering
     GetPassphrase       = 23,  ///< Get room passphrase
     SetPassphrase       = 24,  ///< Set room passphrase
+
+    // Transport (25)
+    GetTransportStatus  = 25,  ///< Get relay transport status (never the token)
 };
 
 /**
@@ -260,6 +263,10 @@ public:
      */
     /// @gdb{tag="CONFIG:IPC", msg="SetPassphrase"}
     ams::Result SetPassphrase(std::array<char, 64> passphrase);
+
+    /** @brief Get the relay transport status (e.g. "Secure (TLSv1.2)" or a TLS error reason) */
+    /// @gdb{tag="CONFIG:IPC", msg="GetTransportStatus"}
+    ams::Result GetTransportStatus(ams::sf::Out<std::array<char, 64>> out);
 };
 
 } // namespace ryu_ldn::ipc
@@ -271,7 +278,7 @@ public:
 /**
  * @brief SF interface macro for ryu:cfg service
  *
- * Defines all IPC commands (0-24) for the configuration service.
+ * Defines all IPC commands (0-25) for the configuration service.
  * Command IDs match ConfigCmd in this header.
  * Groups: Status (0-8), General Settings (9-14), Config Manager (15-24).
  * Uses 9-arg form of AMS_SF_METHOD_INFO with explicit version range.
@@ -304,7 +311,8 @@ public:
     AMS_SF_METHOD_INFO(C, H, 21, ams::Result, GetUsePassphrase,   (ams::sf::Out<u32> out),                              (out),        ams::hos::Version_Min, ams::hos::Version_Max) \
     AMS_SF_METHOD_INFO(C, H, 22, ams::Result, SetUsePassphrase,   (u32 enabled),                                        (enabled),    ams::hos::Version_Min, ams::hos::Version_Max) \
     AMS_SF_METHOD_INFO(C, H, 23, ams::Result, GetPassphrase,      (ams::sf::Out<std::array<char, 64>> out),            (out),        ams::hos::Version_Min, ams::hos::Version_Max) \
-    AMS_SF_METHOD_INFO(C, H, 24, ams::Result, SetPassphrase,      (std::array<char, 64> passphrase),                   (passphrase), ams::hos::Version_Min, ams::hos::Version_Max)
+    AMS_SF_METHOD_INFO(C, H, 24, ams::Result, SetPassphrase,      (std::array<char, 64> passphrase),                   (passphrase), ams::hos::Version_Min, ams::hos::Version_Max) \
+    AMS_SF_METHOD_INFO(C, H, 25, ams::Result, GetTransportStatus, (ams::sf::Out<std::array<char, 64>> out),            (out),        ams::hos::Version_Min, ams::hos::Version_Max)
 
 /**
  * @brief Define the IConfigService interface

@@ -34,6 +34,7 @@
 #include "config.hpp"
 #include "../debug/log.hpp"
 #include "../ldn/ldn_shared_state.hpp"
+#include "../network/wss_client.hpp"
 #include <cstring>
 
 namespace ryu_ldn::ipc {
@@ -438,8 +439,29 @@ ams::Result ConfigService::GetDisableP2p(ams::sf::Out<u32> out) {
 
 ams::Result ConfigService::SetDisableP2p(u32 disabled) {
     std::scoped_lock lk(g_config_mutex);
+    // P2P would bypass the TLS relay; the overlay reverts its toggle on failure
+    if (g_config.server.transport == config::Transport::Wss && disabled == 0) {
+        LOG_WARN("Config IPC: SetDisableP2p refused, P2P is unavailable with transport = wss");
+        R_THROW(ams::sf::ResultNotSupported());
+    }
     g_config.ldn.disable_p2p = (disabled != 0);
     LOG_INFO("Config IPC: SetDisableP2p -> %s", g_config.ldn.disable_p2p ? "true" : "false");
+    R_SUCCEED();
+}
+
+// =============================================================================
+// ConfigService Implementation - Transport
+// =============================================================================
+
+/**
+ * @brief Get the relay transport status for the overlay
+ *
+ * Connection state and TLS error reason only; the token never leaves
+ * the config.
+ */
+ams::Result ConfigService::GetTransportStatus(ams::sf::Out<std::array<char, 64>> out) {
+    std::memset(out->data(), 0, out->size());
+    network::get_transport_status(out->data(), out->size());
     R_SUCCEED();
 }
 

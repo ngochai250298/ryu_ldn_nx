@@ -60,6 +60,8 @@ void MainDashboardGui::BuildConnectionSection(tsl::elm::List* list) {
     list->addItem(new tsl::elm::CategoryHeader("Connection"));
     m_statusItem = new tsl::elm::MiniListItem("Status", "N/A");
     list->addItem(m_statusItem);
+    m_transportItem = new tsl::elm::MiniListItem("Transport", "N/A");
+    list->addItem(m_transportItem);
     m_passphraseItem = new tsl::elm::MiniListItem("Passphrase", "---");
     list->addItem(m_passphraseItem);
 }
@@ -183,6 +185,15 @@ void MainDashboardGui::RefreshConnectionValues() {
         }
         m_statusItem->setValue(ryu_ldn::overlay::ConnectionStatusToString(derivedStatus));
         m_statusItem->setValueColor(ryu_ldn::overlay::StatusColor(derivedStatus));
+    }
+    if (m_transportItem) {
+        // Relay connection state or TLS error reason (never the token)
+        char transport[64];
+        if (R_SUCCEEDED(ryuLdnGetTransportStatus(svc, transport))) {
+            m_transportItem->setValue(transport);
+            m_transportItem->setValueColor(strncmp(transport, "Secure", 6) == 0
+                ? tsl::RGB888("00FF00") : tsl::RGB888("FFAA00"));
+        }
     }
     // Build compact session info for subtitle: "2/8" or "2/8 (Host)"
     {

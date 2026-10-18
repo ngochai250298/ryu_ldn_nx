@@ -48,6 +48,7 @@ enum {
     RyuCfgCmd_SetUsePassphrase    = 22,
     RyuCfgCmd_GetPassphrase       = 23,
     RyuCfgCmd_SetPassphrase       = 24,
+    RyuCfgCmd_GetTransportStatus  = 25,
 };
 
 /// Global service handle
@@ -246,6 +247,16 @@ Result ryuLdnSetPassphrase(RyuLdnConfigService* s, const char* passphrase) {
         strncpy(passphrase_buf, passphrase, 63);
     }
     return serviceDispatchIn(&s->s, RyuCfgCmd_SetPassphrase, passphrase_buf);
+}
+
+Result ryuLdnGetTransportStatus(RyuLdnConfigService* s, char* status) {
+    char status_buf[64];
+    Result rc = serviceDispatchOut(&s->s, RyuCfgCmd_GetTransportStatus, status_buf);
+    if (R_SUCCEEDED(rc)) {
+        memcpy(status, status_buf, 64);
+        status[63] = '\0';
+    }
+    return rc;
 }
 
 const char* ryuLdnStateToString(RyuLdnState state) {

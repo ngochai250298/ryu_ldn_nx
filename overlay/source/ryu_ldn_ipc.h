@@ -52,6 +52,12 @@
  * | 23 | GetPassphrase      | Get room passphrase               |
  * | 24 | SetPassphrase      | Set room passphrase               |
  *
+ * ### Transport (25)
+ *
+ * | ID | Command            | Description                       |
+ * |----|--------------------|-----------------------------------|
+ * | 25 | GetTransportStatus | Relay connection / TLS error text |
+ *
  * @copyright Copyright (c) 2026 ryu_ldn_nx contributors
  * @license GPL-2.0-or-later
  */
@@ -386,6 +392,18 @@ Result ryuLdnGetPassphrase(RyuLdnConfigService* s, char* passphrase);
  * @return Result code
  */
 Result ryuLdnSetPassphrase(RyuLdnConfigService* s, const char* passphrase);
+
+/**
+ * @brief Get the relay transport status
+ *
+ * Connection state or TLS error reason, e.g. "Secure (TLSv1.2)" or
+ * "TLS: certificate not trusted (ca_file)". Never contains the token.
+ *
+ * @param s Configuration service
+ * @param status Output buffer (at least 64 bytes)
+ * @return Result code
+ */
+Result ryuLdnGetTransportStatus(RyuLdnConfigService* s, char* status);
 
 /**
  * @brief Convert LDN state to human-readable string

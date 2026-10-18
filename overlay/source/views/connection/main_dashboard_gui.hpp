@@ -38,6 +38,7 @@ private:
     tsl::elm::OverlayFrame* m_frame = nullptr;
 
     tsl::elm::MiniListItem* m_statusItem = nullptr;
+    tsl::elm::MiniListItem* m_transportItem = nullptr;
     tsl::elm::MiniListItem* m_passphraseItem = nullptr;
 
     tsl::elm::ToggleListItem* m_ldnToggle = nullptr;
