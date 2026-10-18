@@ -525,14 +525,11 @@ void ProxySocket::IncomingConnection(const ryu_ldn::protocol::ProxyConnectReques
         return;
     }
 
-    std::scoped_lock lock(m_queue_mutex);
-
     // Create a new socket for the accepted connection
     auto accepted = std::make_unique<ProxySocket>(m_type, m_protocol);
 
     // Set local address (same as listening socket)
     accepted->m_local_addr = m_local_addr;
-    accepted->m_state = ProxySocketState::Bound;
 
     // Set remote address from request
     // CRITICAL: Do NOT bswap32 the IP - must match Ryujinx/NetworkInfo format
@@ -544,14 +541,14 @@ void ProxySocket::IncomingConnection(const ryu_ldn::protocol::ProxyConnectReques
     // Mark as connected
     accepted->m_state = ProxySocketState::Connected;
 
-    // Add to accept queue
-    m_accept_queue.push_back(std::move(accepted));
+    {
+        std::scoped_lock lock(m_queue_mutex);
+        m_accept_queue.push_back(std::move(accepted));
+        m_accept_event.Signal();
+    }
 
-    // Signal that a connection is available
-    m_accept_event.Signal();
-
-    // Send ProxyConnectReply back to the peer via ProxySocketManager
-    // This confirms the connection was accepted
+    // Send ProxyConnectReply back to the peer via ProxySocketManager, after
+    // releasing m_queue_mutex: the manager lock is always taken first.
     auto& manager = ProxySocketManager::GetInstance();
     uint32_t local_ip = m_local_addr.GetAddr();
     uint16_t local_port = m_local_addr.GetPort();

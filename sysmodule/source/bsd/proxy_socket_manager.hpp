@@ -130,25 +130,26 @@ public:
      * @param fd File descriptor from the real BSD service
      * @param type Socket type (Stream or Dgram)
      * @param protocol Protocol type (Tcp or Udp)
-     * @return Pointer to the created ProxySocket, or nullptr if failed
+     * @return The proxy socket (the existing one if fd already has one),
+     *         or nullptr if the limit is reached
      *
      * @note Thread-safe
-     * @note Returns nullptr if fd already has a proxy socket
      */
     /// @gdb{tag="BSD:SOCKET", msg="CreateProxySocket: fd=%d type=%d protocol=%d", args="$x1, $x2, $x3"}
-    ProxySocket* CreateProxySocket(s32 fd, ryu_ldn::bsd::SocketType type, ryu_ldn::bsd::ProtocolType protocol);
+    std::shared_ptr<ProxySocket> CreateProxySocket(s32 fd, ryu_ldn::bsd::SocketType type, ryu_ldn::bsd::ProtocolType protocol);
 
     /**
      * @brief Get the proxy socket for a file descriptor
      *
      * @param fd File descriptor to look up
-     * @return Pointer to the ProxySocket, or nullptr if not a proxy socket
+     * @return The ProxySocket, or nullptr if not a proxy socket
      *
      * @note Thread-safe
-     * @note The returned pointer is valid as long as the socket is not closed
+     * @note The returned reference keeps the socket alive after a concurrent
+     *       Close/Reset; the socket is then in the Closed state.
      */
     /// @gdb{tag="BSD:SOCKET", msg="GetProxySocket: fd=%d", args="$x1"}
-    ProxySocket* GetProxySocket(s32 fd);
+    std::shared_ptr<ProxySocket> GetProxySocket(s32 fd);
 
     /**
      * @brief Check if a file descriptor has an associated proxy socket
@@ -545,19 +546,6 @@ private:
     ~ProxySocketManager() = default;
 
     /**
-     * @brief Find a socket matching the given destination (first match)
-     *
-     * @param dest_ip Destination IP (host byte order)
-     * @param dest_port Destination port (host byte order)
-     * @param protocol Protocol type
-     * @return Pointer to matching socket, or nullptr if not found
-     *
-     * @note Caller must hold m_mutex
-     */
-    ProxySocket* FindSocketByDestination(uint32_t dest_ip, uint16_t dest_port,
-                                          ryu_ldn::bsd::ProtocolType protocol);
-
-    /**
      * @brief Find all sockets matching the given destination
      *
      * For broadcast/multicast packets, multiple sockets may match.
@@ -584,7 +572,7 @@ private:
     /**
      * @brief Map of file descriptor to ProxySocket
      */
-    std::unordered_map<s32, std::unique_ptr<ProxySocket>> m_sockets;
+    std::unordered_map<s32, std::shared_ptr<ProxySocket>> m_sockets;
 
     /**
      * @brief Ephemeral port pool

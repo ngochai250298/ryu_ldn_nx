@@ -15,6 +15,8 @@
 #include <cstddef>
 #include <chrono>
 #include <thread>
+#include <atomic>
+#include <unistd.h>
 
 #include "bsd/bsd_types.hpp"
 #include "bsd/proxy_socket.hpp"
@@ -57,6 +59,7 @@ static int g_tests_failed = 0;
 
 namespace rb = ryu_ldn::bsd;
 using ams::mitm::bsd::ProxySocket;
+using ams::mitm::bsd::ProxySocketManager;
 
 namespace {
 
@@ -101,6 +104,40 @@ struct BlockedReceiver {
     }) {}
     void Join() { thread.join(); }
 };
+
+std::atomic<int> g_disconnects{0};
+bool CountDisconnect(uint32_t, uint16_t, uint32_t, uint16_t, rb::ProtocolType) { g_disconnects++; return true; }
+bool AcceptConnect(uint32_t, uint16_t, uint32_t, uint16_t, rb::ProtocolType) { return true; }
+
+/// Runs fn on a thread; fails the process if it hasn't finished in 2 s (deadlock).
+template<typename F>
+bool FinishesInTime(F fn) {
+    std::atomic<bool> done{false};
+    std::thread t([&] { fn(); done = true; });
+    for (int i = 0; i < 200 && !done; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!done) {
+        printf("FAIL\n    deadlock: call did not return within 2 s\n");
+        fflush(stdout);
+        _exit(1);
+    }
+    t.join();
+    return true;
+}
+
+/// A TCP proxy socket registered as fd, with a remote peer set so Close
+/// sends ProxyDisconnect through the manager.
+std::shared_ptr<ProxySocket> ConnectedTcp(s32 fd) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.SetProxyConnectCallback(AcceptConnect);
+    m.SetProxyDisconnectCallback(CountDisconnect);
+    auto s = m.CreateProxySocket(fd, rb::SocketType::Stream, rb::ProtocolType::Tcp);
+    s->Bind(LdnAddr(4000));
+    s->SetNonBlocking(true);
+    s->Connect(LdnAddr(5000));  // EINPROGRESS, but the peer is recorded
+    return s;
+}
 
 } // namespace
 
@@ -228,6 +265,59 @@ TEST(shutdown_write_does_not_spin_blocked_receiver) {
     r.Join();
     ASSERT_EQ(r.result, -kEAgain);
     ASSERT_TRUE(ElapsedMs(start) >= 80);
+}
+
+// ============================================================================
+// Proxy socket lifetime (close while another thread is inside the socket)
+// ============================================================================
+
+TEST(close_proxy_socket_wakes_waiter_without_freeing_it) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    auto created = m.CreateProxySocket(7, rb::SocketType::Dgram, rb::ProtocolType::Udp);
+    created->Bind(LdnAddr(6000));
+    created.reset();
+
+    // As an IPC handler would: look up, then block inside the socket.
+    auto held = m.GetProxySocket(7);
+    BlockedReceiver r(*held);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    ASSERT_TRUE(m.CloseProxySocket(7));
+    r.Join();
+    ASSERT_EQ(r.result, -kEBadF);
+    ASSERT_TRUE(m.GetProxySocket(7) == nullptr);
+    ASSERT_TRUE(held->GetState() == ams::mitm::bsd::ProxySocketState::Closed);
+}
+
+TEST(reset_wakes_waiter_without_freeing_it) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    auto held = m.CreateProxySocket(8, rb::SocketType::Dgram, rb::ProtocolType::Udp);
+    held->Bind(LdnAddr(6001));
+    BlockedReceiver r(*held);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    m.Reset();
+    r.Join();
+    ASSERT_EQ(r.result, -kEBadF);
+    ASSERT_EQ(m.GetActiveSocketCount(), 0u);
+}
+
+TEST(close_tcp_proxy_sends_disconnect_without_deadlock) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    ConnectedTcp(9);
+    g_disconnects = 0;
+    FinishesInTime([&] { m.CloseProxySocket(9); });
+    ASSERT_EQ(g_disconnects.load(), 1);
+}
+
+TEST(reset_sends_tcp_disconnect_before_clearing_callbacks) {
+    auto& m = ProxySocketManager::GetInstance();
+    m.Reset();
+    ConnectedTcp(10);
+    g_disconnects = 0;
+    FinishesInTime([&] { m.Reset(); });
+    ASSERT_EQ(g_disconnects.load(), 1);
 }
 
 TEST(timeval_to_nanoseconds) {

@@ -216,11 +216,13 @@ $(TARGET_BSD_MITM_FILTER): bsd_mitm_filter_tests.o
 	$(CXX) $(LDFLAGS) -o $@ $^
 
 # BSD proxy tests (real bsd/ sources, built against tests/host_shim)
-BSD_PROXY_CXXFLAGS := $(CXXFLAGS) -Ihost_shim -pthread
+# AddressSanitizer catches use-after-free in the proxy socket lifetime tests.
+BSD_PROXY_SANITIZE := -fsanitize=address -fno-omit-frame-pointer
+BSD_PROXY_CXXFLAGS := $(CXXFLAGS) -Ihost_shim -pthread $(BSD_PROXY_SANITIZE)
 BSD_PROXY_OBJECTS := bsd_proxy_socket.o bsd_proxy_socket_manager.o bsd_ephemeral_port_pool.o
 
 $(TARGET_BSD_PROXY): bsd_proxy_tests.o $(BSD_PROXY_OBJECTS) log.o config.o
-	$(CXX) $(LDFLAGS) -pthread -o $@ $^
+	$(CXX) $(LDFLAGS) -pthread $(BSD_PROXY_SANITIZE) -o $@ $^
 
 bsd_proxy_tests.o: bsd_proxy_tests.cpp host_shim/stratosphere.hpp
 	$(CXX) $(BSD_PROXY_CXXFLAGS) -c -o $@ $<
