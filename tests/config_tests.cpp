@@ -115,7 +115,6 @@ TEST(default_values) {
     ASSERT_EQ(config.server.port, 443);
     ASSERT_TRUE(config.server.transport == Transport::None);
     ASSERT_STREQ(config.server.path, "/ldn");
-    ASSERT_STREQ(config.server.console_id, "");
     ASSERT_STREQ(config.server.token, "");
     ASSERT_STREQ(config.server.ca_file, "sdmc:/config/ryu_ldn_nx/ca.pem");
 
@@ -458,7 +457,6 @@ TEST(parse_relay_keys) {
         "host = relay.example.workers.dev\n"
         "transport = wss\n"
         "path = /ldn\n"
-        "console_id = switch-1\n"
         "token = %s\n"
         "ca_file = sdmc:/config/ryu_ldn_nx/ca.pem\n", VALID_TOKEN);
     TempConfigFile file(content);
@@ -466,7 +464,6 @@ TEST(parse_relay_keys) {
     ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
 
     ASSERT_TRUE(config.server.transport == Transport::Wss);
-    ASSERT_STREQ(config.server.console_id, "switch-1");
     // Stored lowercase, as the relay compares it
     ASSERT_STREQ(config.server.token, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
 }
@@ -499,16 +496,15 @@ TEST(token_rejected_unless_64_hex) {
     }
 }
 
-TEST(console_id_rejected_unless_relay_charset) {
-    const char* bad[] = {"Switch-1", "switch_1", "0123456789abcdef0123456789abcdef0"};
-    for (const char* id : bad) {
-        char content[256];
-        snprintf(content, sizeof(content), "[server]\nconsole_id = %s\n", id);
-        TempConfigFile file(content);
-        Config config = get_default_config();
-        ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
-        ASSERT_STREQ(config.server.console_id, "");
-    }
+TEST(legacy_console_id_line_is_ignored) {
+    char content[512];
+    snprintf(content, sizeof(content),
+        "[server]\nhost = relay.example\ntransport = wss\nconsole_id = x\ntoken = %s\n", VALID_TOKEN);
+    TempConfigFile file(content);
+    Config config = get_default_config();
+    ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
+    ASSERT_STREQ(config.server.host, "relay.example");
+    ASSERT_STREQ(config.server.token, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
 }
 
 TEST(wss_transport_forces_p2p_off) {
@@ -521,7 +517,7 @@ TEST(wss_transport_forces_p2p_off) {
 TEST(save_config_keeps_relay_keys) {
     char content[512];
     snprintf(content, sizeof(content),
-        "[server]\nhost = relay.example\ntransport = wss\nconsole_id = switch-1\ntoken = %s\n", VALID_TOKEN);
+        "[server]\nhost = relay.example\ntransport = wss\ntoken = %s\n", VALID_TOKEN);
     TempConfigFile file(content);
     Config config = get_default_config();
     ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);
@@ -534,7 +530,6 @@ TEST(save_config_keeps_relay_keys) {
     std::remove(path);
 
     ASSERT_TRUE(loaded.server.transport == Transport::Wss);
-    ASSERT_STREQ(loaded.server.console_id, "switch-1");
     ASSERT_STREQ(loaded.server.token, config.server.token);
     ASSERT_EQ(loaded.server.port, config.server.port);
 }
@@ -558,7 +553,6 @@ TEST(save_config_writes_port_and_relay_keys) {
     ASSERT_TRUE(text.find("port = 4443\n") != std::string::npos);
     ASSERT_TRUE(text.find("transport = ") != std::string::npos);
     ASSERT_TRUE(text.find("path = ") != std::string::npos);
-    ASSERT_TRUE(text.find("console_id = ") != std::string::npos);
     ASSERT_TRUE(text.find("token = ") != std::string::npos);
     ASSERT_TRUE(text.find("ca_file = ") != std::string::npos);
 }
@@ -567,7 +561,7 @@ TEST(save_config_writes_port_and_relay_keys) {
 TEST(save_config_token_round_trip_is_stable) {
     char content[512];
     snprintf(content, sizeof(content),
-        "[server]\nhost = relay.example\ntransport = wss\nconsole_id = switch-1\ntoken = %s\n", VALID_TOKEN);
+        "[server]\nhost = relay.example\ntransport = wss\ntoken = %s\n", VALID_TOKEN);
     TempConfigFile file(content);
     Config config = get_default_config();
     ASSERT_EQ(load_config(file.path(), config), ConfigResult::Success);

@@ -22,7 +22,7 @@
  *
  * ## Wire contract
  *
- * - `GET <path>` upgrade with `X-Console-Id` and `Authorization: Bearer <token>`;
+ * - `GET <path>` upgrade with `Authorization: Bearer <token>`;
  *   anything but `101` with a valid `Sec-WebSocket-Accept` fails the connect.
  * - One RyuLdn packet (LdnHeader + payload) per masked binary message.
  * - Server frames may be fragmented; payloads of binary and continuation
@@ -168,7 +168,7 @@ public:
     /**
      * @brief Create a disconnected client
      *
-     * @param server Server config (path, console_id, token, ca_file are copied)
+     * @param server Server config (path, token, ca_file are copied)
      */
     explicit WssClient(const config::ServerConfig& server);
 

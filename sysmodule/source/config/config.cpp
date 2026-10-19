@@ -240,24 +240,6 @@ void parse_token(const char* value, char* token) {
 }
 
 /**
- * @brief Store the console ID if it matches the relay's [a-z0-9-]{1,32} rule
- */
-void parse_console_id(const char* value, char* console_id) {
-    console_id[0] = '\0';
-    size_t len = std::strlen(value);
-    if (len == 0 || len > MAX_CONSOLE_ID_LENGTH) {
-        return;
-    }
-    for (size_t i = 0; i < len; i++) {
-        char c = value[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) {
-            return;
-        }
-    }
-    safe_strcpy(console_id, value, MAX_CONSOLE_ID_LENGTH);
-}
-
-/**
  * @brief Enforce cross-section rules after a load
  *
  * P2P opens sockets outside the TLS-protected relay path, so it is
@@ -301,8 +283,6 @@ void process_server_key(const char* key, const char* value, ServerConfig& config
         config.transport = std::strcmp(value, "wss") == 0 ? Transport::Wss : Transport::None;
     } else if (std::strcmp(key, "path") == 0) {
         safe_strcpy(config.path, value, MAX_PATH_LENGTH);
-    } else if (std::strcmp(key, "console_id") == 0) {
-        parse_console_id(value, config.console_id);
     } else if (std::strcmp(key, "token") == 0) {
         parse_token(value, config.token);
     } else if (std::strcmp(key, "ca_file") == 0) {
@@ -458,7 +438,6 @@ size_t format_config_content(char* buffer, size_t buffer_size, const Config& con
     WRITE_LINE("; Secure WebSocket transport (plain TCP is refused)");
     WRITE_LINE("transport = %s", config.server.transport == Transport::Wss ? "wss" : "");
     WRITE_LINE("path = %s", config.server.path);
-    WRITE_LINE("console_id = %s", config.server.console_id);
     WRITE_LINE("; Secret: 64 hex characters, one per console");
     WRITE_LINE("token = %s", config.server.token);
     WRITE_LINE("ca_file = %s", config.server.ca_file);
@@ -514,7 +493,6 @@ Config get_default_config() {
     config.server.port = DEFAULT_PORT;
     config.server.transport = DEFAULT_TRANSPORT;
     safe_strcpy(config.server.path, DEFAULT_PATH, MAX_PATH_LENGTH);
-    config.server.console_id[0] = '\0';
     config.server.token[0] = '\0';
     safe_strcpy(config.server.ca_file, DEFAULT_CA_FILE, MAX_CA_FILE_LENGTH);
 

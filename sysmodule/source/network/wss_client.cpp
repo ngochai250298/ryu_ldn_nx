@@ -291,13 +291,13 @@ ClientResult WssClient::connect(const char* host, uint16_t port, uint32_t timeou
         return ClientResult::NotInitialized;
     }
 
-    if (host == nullptr || host[0] == '\0' || m_server.console_id[0] == '\0' || m_server.token[0] == '\0') {
-        LOG_WARN("WssClient: refusing to connect, [server] host/console_id/token not configured or invalid");
-        set_transport_status("Not configured (host, console_id, token)");
+    if (host == nullptr || host[0] == '\0' || m_server.token[0] == '\0') {
+        LOG_WARN("WssClient: refusing to connect, [server] host/token not configured or invalid");
+        set_transport_status("Not configured (host, token)");
         return ClientResult::ConnectionFailed;
     }
 
-    LOG_INFO("WssClient::connect(%s, %u, path=%s, console_id=%s)", host, port, m_server.path, m_server.console_id);
+    LOG_INFO("WssClient::connect(%s, %u, path=%s)", host, port, m_server.path);
     set_transport_status("Connecting");
 
     {
@@ -506,11 +506,10 @@ ClientResult WssClient::upgrade(const char* host, uint16_t port) {
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Key: %s\r\n"
         "Sec-WebSocket-Version: 13\r\n"
-        "X-Console-Id: %s\r\n"
         "Authorization: Bearer %s\r\n"
         "\r\n",
         m_server.path[0] != '\0' ? m_server.path : "/", host_header, key,
-        m_server.console_id, m_server.token);
+        m_server.token);
 
     SocketResult write_result = SocketResult::SocketError;
     if (request_len > 0 && static_cast<size_t>(request_len) < sizeof(request)) {
@@ -566,7 +565,7 @@ ClientResult WssClient::upgrade(const char* host, uint16_t port) {
             std::snprintf(status, sizeof(status), "Relay rejected this console (HTTP %d)", status_code);
             set_transport_status(status);
             // The relay answers any auth failure with a plain 404
-            LOG_WARN("WssClient: upgrade refused with HTTP %d (check console_id/token/path)", status_code);
+            LOG_WARN("WssClient: upgrade refused with HTTP %d (check token/path)", status_code);
             return ClientResult::Rejected;
         }
         case ws::UpgradeResult::BadAccept:

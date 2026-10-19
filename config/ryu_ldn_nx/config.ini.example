@@ -11,8 +11,6 @@ port = 443
 transport = wss
 ; WebSocket path on the relay
 path = /ldn
-; Console id sent as X-Console-Id (a-z, 0-9, '-', 1-32 characters)
-console_id =
 ; Secret: 64 hex characters, one per console. Never share it.
 token =
 ; Trust anchors (PEM, at most 64 KB) used to verify the relay certificate

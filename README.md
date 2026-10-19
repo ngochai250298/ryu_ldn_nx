@@ -67,7 +67,6 @@ Create `sdmc:/config/ryu_ldn_nx/config.ini` (or let the sysmodule auto-create it
 host = relay.example.com         ; relay hostname (empty = do not connect)
 port = 443
 transport = wss                  ; required: TLS WebSocket, plain TCP is refused
-console_id = living-room         ; a-z, 0-9, '-' (1-32 characters)
 token =                          ; 64 hex characters, one per console
 ca_file = sdmc:/config/ryu_ldn_nx/ca.pem
 

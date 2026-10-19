@@ -53,7 +53,7 @@ constexpr bool UseRelay(bool ldn_enabled, bool online, uint64_t button_mask, uin
 /// Result descriptions for relay failures (shown as 2016-0101 .. 2016-0104)
 constexpr uint32_t ResultDescRelayUnreachable = 101;  ///< DNS, TCP refused, timeout
 constexpr uint32_t ResultDescRelayTls         = 102;  ///< TLS handshake or certificate
-constexpr uint32_t ResultDescRelayRejected    = 103;  ///< Bad token, console_id or path
+constexpr uint32_t ResultDescRelayRejected    = 103;  ///< Bad token or path
 constexpr uint32_t ResultDescRelayHandshake   = 104;  ///< LDN handshake failed or timed out
 
 /// Result description for a failed transport connect()

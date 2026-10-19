@@ -33,7 +33,6 @@ port = 443
 ; Secure WebSocket transport (plain TCP is refused)
 transport = wss
 path = /ldn
-console_id =
 ; Secret: 64 hex characters, one per console
 token =
 ca_file = sdmc:/config/ryu_ldn_nx/ca.pem
@@ -101,7 +100,6 @@ This means `true`, `True`, `yes`, `Yes`, `1` all evaluate to **true**, while `fa
 | `port` | `443` | Relay port |
 | `transport` | *(empty)* | Must be `wss` (TLS WebSocket). Missing, empty or anything else refuses to connect; plain TCP is not offered |
 | `path` | `/ldn` | WebSocket path on the relay |
-| `console_id` | *(empty)* | Sent as `X-Console-Id`: `a-z`, `0-9`, `-`, 1 to 32 characters |
 | `token` | *(empty)* | Sent as `Authorization: Bearer`: exactly 64 hex characters, anything else is rejected. Never logged or shown in the overlay |
 | `ca_file` | `sdmc:/config/ryu_ldn_nx/ca.pem` | PEM trust anchors (at most 64 KB) that the relay certificate must chain to; the hostname is checked too |
 
@@ -111,7 +109,6 @@ With `transport = wss`, `disable_p2p` is forced to `1`.
 [server]
 host = relay.example.com
 transport = wss
-console_id = living-room
 token = <64 hex characters>
 ```
 

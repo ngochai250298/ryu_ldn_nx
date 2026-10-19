@@ -196,7 +196,7 @@ struct RyuLdnClientConfig {
     /**
      * @brief [server] section, used to pick and configure the transport
      *
-     * transport selects WssClient; path, console_id, token and ca_file
+     * transport selects WssClient; path, token and ca_file
      * configure it. Zeroed (Transport::None) by the default constructor.
      */
     config::ServerConfig server;

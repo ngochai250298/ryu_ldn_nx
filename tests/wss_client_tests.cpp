@@ -98,13 +98,11 @@ static struct IgnoreSigpipe {
 // =============================================================================
 
 static const char* TEST_TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-static const char* TEST_CONSOLE_ID = "switch-1";
 
 static ryu_ldn::config::ServerConfig make_server_config(const char* ca_file = "wss_certs/ca.pem") {
     ryu_ldn::config::ServerConfig server{};
     server.transport = ryu_ldn::config::Transport::Wss;
     std::strcpy(server.path, "/ldn");
-    std::strcpy(server.console_id, TEST_CONSOLE_ID);
     std::strcpy(server.token, TEST_TOKEN);
     std::strcpy(server.ca_file, ca_file);
     return server;
@@ -339,7 +337,6 @@ private:
         // Relay contract: any auth failure is a bare 404
         if (request.compare(0, 9, "GET /ldn ") != 0 ||
             header_value("Authorization") != std::string("Bearer ") + TEST_TOKEN ||
-            header_value("X-Console-Id") != TEST_CONSOLE_ID ||
             header_value("Upgrade") != "websocket") {
             write_str("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
             return;
@@ -568,7 +565,7 @@ TEST(upgrade_response_failures) {
 // =============================================================================
 
 /**
- * @test Missing token/console_id refuses before touching the network
+ * @test Missing token refuses before touching the network
  */
 TEST(refuses_without_credentials) {
     auto server = make_server_config();

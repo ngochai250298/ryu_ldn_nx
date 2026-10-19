@@ -89,13 +89,6 @@ constexpr size_t MAX_PASSPHRASE_LENGTH = 64;
 /** @brief Maximum length of the WebSocket upgrade path (excluding null terminator) */
 constexpr size_t MAX_PATH_LENGTH = 64;
 
-/**
- * @brief Maximum length of the console ID sent as X-Console-Id
- *
- * The relay accepts 1..32 characters from [a-z0-9-].
- */
-constexpr size_t MAX_CONSOLE_ID_LENGTH = 32;
-
 /** @brief Exact length of the per-console relay token (lowercase hex of 32 random bytes) */
 constexpr size_t TOKEN_LENGTH = 64;
 
@@ -215,11 +208,10 @@ enum class ConfigResult {
  * - `port`: Server port number
  * - `transport`: `wss` (TLS 1.2+ WebSocket); missing or any other value refuses to connect
  * - `path`: WebSocket upgrade path (e.g. /ldn)
- * - `console_id`: Console ID sent as X-Console-Id ([a-z0-9-], 1..32 chars)
  * - `token`: Per-console relay token, exactly 64 hex characters
  * - `ca_file`: PEM CA bundle used to verify the relay certificate
  *
- * An invalid `console_id` or `token` is rejected at load time (left empty),
+ * An invalid `token` is rejected at load time (left empty),
  * which makes the client refuse to connect. The token is a secret: it must
  * never be logged or exposed over ryu:cfg.
  */
@@ -228,7 +220,6 @@ struct ServerConfig {
     uint16_t port;                                  ///< Server port number
     Transport transport;                            ///< Relay transport (None = refuse)
     char path[MAX_PATH_LENGTH + 1];                 ///< WebSocket upgrade path
-    char console_id[MAX_CONSOLE_ID_LENGTH + 1];     ///< X-Console-Id value
     char token[TOKEN_LENGTH + 1];                   ///< Bearer token (lowercase hex, secret)
     char ca_file[MAX_CA_FILE_LENGTH + 1];           ///< CA bundle path
 };
@@ -310,7 +301,7 @@ struct Config {
  * - server.port: 443
  * - server.transport: None (must be set to `wss`)
  * - server.path: "/ldn"
- * - server.console_id / server.token: "" (must be configured)
+ * - server.token: "" (must be configured)
  * - server.ca_file: "sdmc:/config/ryu_ldn_nx/ca.pem"
  * - ldn.enabled: true
  * - ldn.passphrase: "" (empty)
