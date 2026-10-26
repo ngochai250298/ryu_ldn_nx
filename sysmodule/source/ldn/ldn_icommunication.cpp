@@ -2833,6 +2833,35 @@ void ICommunicationService::ReceiveThreadFunc() {
     LOG_INFO("Receive thread started");
 
     while (m_recv_thread_running.load()) {
+        // Apply a reconnect request from ryu:cfg (SetPassphrase + ForceReconnect).
+        //
+        // Checked before the is_connected() guard below: a disconnected client
+        // would otherwise `continue` forever and never consume the flag, which
+        // is what made ForceReconnect a no-op — nothing called
+        // ConsumeReconnectRequest() anywhere in the tree.
+        //
+        // The client's config is a snapshot taken when this service was
+        // constructed, and send_initialize() reads that snapshot, not
+        // g_config. So the config must be rebuilt here or a new passphrase
+        // never reaches the relay.
+        //
+        // Safe on this thread: no lock is held here (we are outside update(),
+        // so m_conn_mutex is free), which is the same reason the inactivity
+        // timeout below can call DisconnectFromServer().
+        if (SharedState::GetInstance().ConsumeReconnectRequest()) {
+            LOG_INFO("Reconnect requested via ryu:cfg - rebuilding client config");
+            {
+                std::scoped_lock lk(ryu_ldn::ipc::g_config_mutex);
+                m_server_client.set_config(
+                    ryu_ldn::network::RyuLdnClientConfig(ryu_ldn::ipc::g_config));
+            }
+            // Drop the socket so the next Scan/CreateNetwork/Connect
+            // re-handshakes with the new passphrase. Reconnecting on demand
+            // is how the rest of this service already behaves.
+            DisconnectFromServer();
+            continue;
+        }
+
         // Drive the client's state machine whenever the TCP connection is
         // alive — this covers the handshake phase (Connected/Handshaking)
         // as well as the Ready phase.  m_server_connected is only set
@@ -2851,6 +2880,24 @@ void ICommunicationService::ReceiveThreadFunc() {
         // holds m_shared_mutex during HandleServerPacket processing.
         uint64_t current_time_ms = armTicksToNs(armGetSystemTick()) / 1000000ULL;
         m_server_client.update(current_time_ms);
+
+        // Publish link metrics for ryu:cfg (GetLinkMetrics / GetLastRtt).
+        // Done here, outside update(), because RyuLdnClient::get_transport_counters()
+        // takes m_conn_mutex — which update() holds — so calling it from a
+        // callback would deadlock.
+        {
+            const auto counters = m_server_client.get_transport_counters();
+            SharedState::LinkMetrics metrics;
+            metrics.tx_packets   = counters.tx_packets;
+            metrics.rx_packets   = counters.rx_packets;
+            metrics.tx_errors    = counters.tx_errors;
+            metrics.rx_oversized = counters.rx_oversized;
+            metrics.rx_skipped   = counters.rx_skipped;
+            metrics.rtt_ms       = counters.rtt_ms;
+            metrics.rtt_samples  = counters.rtt_samples;
+            metrics.rtt_lost     = counters.rtt_lost;
+            SharedState::GetInstance().SetLinkMetrics(metrics);
+        }
 
         // Inactivity timeout (Ryujinx NetworkTimeout -> TimeoutConnection).
         // Acted on here, with no lock held: DisconnectFromServer() takes the

@@ -53,8 +53,9 @@ enum class ConfigCmd : u32 {
     GetPassphrase       = 23,  ///< Get room passphrase
     SetPassphrase       = 24,  ///< Set room passphrase
 
-    // Transport (25)
+    // Transport (25-26)
     GetTransportStatus  = 25,  ///< Get relay transport status (never the token)
+    GetLinkMetrics      = 26,  ///< Get RTT and packet counters (LinkMetricsIpc)
 };
 
 /**
@@ -91,6 +92,36 @@ struct SessionInfoIpc {
     u8 reserved[4];     ///< Reserved for future use
 };
 static_assert(sizeof(SessionInfoIpc) == 8);
+
+/**
+ * @brief Link quality structure for IPC
+ *
+ * Everything a client needs to show a truthful connection test: a measured
+ * RTT, how many probes were answered or lost, and packet counters.
+ *
+ * `rtt_ms` is 0 when unknown — no probe answered yet, or the link is down.
+ * A caller must render that as "—", never as 0 ms. `rtt_samples` is how to
+ * tell the two apart: 0 samples means never measured.
+ *
+ * Counters are monotonic for the life of a connection; sample twice and
+ * subtract for a rate. There is no loss percentage here on purpose: the
+ * transport cannot see packets the relay never sent, so `rtt_lost` over
+ * `rtt_samples + rtt_lost` is the only honest loss signal available.
+ *
+ * Explicit padding keeps the layout stable for the overlay's C stubs.
+ */
+struct LinkMetricsIpc {
+    u64 tx_packets;    ///< Packets handed to the transport
+    u64 rx_packets;    ///< Complete packets received
+    u64 tx_errors;     ///< Sends that did not complete
+    u64 rx_oversized;  ///< Packets too big for the caller's buffer
+    u64 rx_skipped;    ///< Packets dropped, over the reassembly buffer
+    u32 rtt_ms;        ///< Last round trip in ms, 0 = unknown
+    u32 rtt_samples;   ///< Probes answered
+    u32 rtt_lost;      ///< Probes unanswered
+    u32 reserved;      ///< Padding, keeps the struct 8-byte aligned at 56
+};
+static_assert(sizeof(LinkMetricsIpc) == 56);
 
 /**
  * @brief Global configuration instance
@@ -274,6 +305,12 @@ public:
     /** @brief Get the relay transport status (e.g. "Secure (TLSv1.2)" or a TLS error reason) */
     /// @gdb{tag="CONFIG:IPC", msg="GetTransportStatus"}
     ams::Result GetTransportStatus(ams::sf::Out<std::array<char, 64>> out);
+
+    /** @brief Get measured RTT and packet counters
+     *  @param out LinkMetricsIpc struct; rtt_ms 0 means unknown
+     */
+    /// @gdb{tag="CONFIG:IPC", msg="GetLinkMetrics"}
+    ams::Result GetLinkMetrics(ams::sf::Out<LinkMetricsIpc> out);
 };
 
 } // namespace ryu_ldn::ipc
@@ -285,9 +322,10 @@ public:
 /**
  * @brief SF interface macro for ryu:cfg service
  *
- * Defines all IPC commands (0-25) for the configuration service.
+ * Defines all IPC commands (0-26) for the configuration service.
  * Command IDs match ConfigCmd in this header.
- * Groups: Status (0-8), General Settings (9-14), Config Manager (15-24).
+ * Groups: Status (0-8), General Settings (9-14), Config Manager (15-24),
+ * Transport (25-26).
  * Uses 9-arg form of AMS_SF_METHOD_INFO with explicit version range.
  */
 #define AMS_RYU_CFG_SERVICE_INTERFACE(C, H)                                                                                              \
@@ -319,7 +357,8 @@ public:
     AMS_SF_METHOD_INFO(C, H, 22, ams::Result, SetUsePassphrase,   (u32 enabled),                                        (enabled),    ams::hos::Version_Min, ams::hos::Version_Max) \
     AMS_SF_METHOD_INFO(C, H, 23, ams::Result, GetPassphrase,      (ams::sf::Out<std::array<char, 64>> out),            (out),        ams::hos::Version_Min, ams::hos::Version_Max) \
     AMS_SF_METHOD_INFO(C, H, 24, ams::Result, SetPassphrase,      (std::array<char, 64> passphrase),                   (passphrase), ams::hos::Version_Min, ams::hos::Version_Max) \
-    AMS_SF_METHOD_INFO(C, H, 25, ams::Result, GetTransportStatus, (ams::sf::Out<std::array<char, 64>> out),            (out),        ams::hos::Version_Min, ams::hos::Version_Max)
+    AMS_SF_METHOD_INFO(C, H, 25, ams::Result, GetTransportStatus, (ams::sf::Out<std::array<char, 64>> out),            (out),        ams::hos::Version_Min, ams::hos::Version_Max) \
+    AMS_SF_METHOD_INFO(C, H, 26, ams::Result, GetLinkMetrics,     (ams::sf::Out<ryu_ldn::ipc::LinkMetricsIpc> out),    (out),        ams::hos::Version_Min, ams::hos::Version_Max)
 
 /**
  * @brief Define the IConfigService interface

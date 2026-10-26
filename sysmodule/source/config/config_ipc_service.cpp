@@ -232,7 +232,10 @@ ams::Result ConfigService::SetPassphrase(std::array<char, 64> passphrase) {
         R_THROW(ams::sf::ResultNotSupported());
     }
 
-    LOG_INFO("Config IPC: SetPassphrase -> '%s'", g_config.ldn.passphrase);
+    // Never log the passphrase itself: it is the room code a player shares
+    // with friends, and the log file is world-readable on the SD card.
+    // Length alone is enough to tell "set" from "cleared" when debugging.
+    LOG_INFO("Config IPC: SetPassphrase -> %zu chars", std::strlen(g_config.ldn.passphrase));
     R_SUCCEED();
 }
 
@@ -439,6 +442,31 @@ ams::Result ConfigService::GetLastRtt(ams::sf::Out<u32> out) {
     auto& state = ams::mitm::ldn::SharedState::GetInstance();
     *out = state.GetLastRtt();
     LOG_VERBOSE("Config IPC: GetLastRtt -> %u ms", *out);
+    R_SUCCEED();
+}
+
+ams::Result ConfigService::GetLinkMetrics(ams::sf::Out<LinkMetricsIpc> out) {
+    auto& state = ams::mitm::ldn::SharedState::GetInstance();
+    const auto metrics = state.GetLinkMetrics();
+
+    std::memset(&(*out), 0, sizeof(LinkMetricsIpc));
+    out->tx_packets   = metrics.tx_packets;
+    out->rx_packets   = metrics.rx_packets;
+    out->tx_errors    = metrics.tx_errors;
+    out->rx_oversized = metrics.rx_oversized;
+    out->rx_skipped   = metrics.rx_skipped;
+    out->rtt_ms       = metrics.rtt_ms;
+    out->rtt_samples  = metrics.rtt_samples;
+    out->rtt_lost     = metrics.rtt_lost;
+
+    LOG_VERBOSE("Config IPC: GetLinkMetrics -> rtt=%u ms (%u ok / %u lost), tx=%llu rx=%llu, "
+                "tx_err=%llu oversized=%llu skipped=%llu",
+                out->rtt_ms, out->rtt_samples, out->rtt_lost,
+                static_cast<unsigned long long>(out->tx_packets),
+                static_cast<unsigned long long>(out->rx_packets),
+                static_cast<unsigned long long>(out->tx_errors),
+                static_cast<unsigned long long>(out->rx_oversized),
+                static_cast<unsigned long long>(out->rx_skipped));
     R_SUCCEED();
 }
 

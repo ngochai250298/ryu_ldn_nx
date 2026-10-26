@@ -456,6 +456,17 @@ public:
     /// @gdb{tag="NETWORK:CONNECTION", msg="get_last_rtt_ms"}
     uint64_t get_last_rtt_ms() const;
 
+    /**
+     * @brief Read the transport's link counters
+     *
+     * Zeroed when no transport exists (unconfigured transport, or before the
+     * first connect), which reads as "unknown" rather than as a clean link.
+     *
+     * @return Snapshot of the counters @see TransportCounters
+     */
+    /// @gdb{tag="NETWORK:CONNECTION", msg="get_transport_counters"}
+    TransportCounters get_transport_counters() const;
+
     // ========================================================================
     // Packet Sending
     // ========================================================================
@@ -635,7 +646,9 @@ private:
     using ConnMutex = ::ams::os::SdkMutex;
 #endif
     /// Held by connect/disconnect/update/set_config; see Thread Safety
-    ConnMutex m_conn_mutex;
+    /// mutable so const readers (get_transport_counters) can lock it rather
+    /// than race connect() swapping m_tcp_client.
+    mutable ConnMutex m_conn_mutex;
 
     // ========================================================================
     // Internal Methods

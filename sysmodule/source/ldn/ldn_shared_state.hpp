@@ -282,6 +282,49 @@ public:
     u32 GetLastRtt() const;
 
     // =========================================================================
+    // Link Metrics
+    // =========================================================================
+
+    /**
+     * @brief Link quality as published by the network transport
+     *
+     * Mirrors network::TransportCounters, kept as its own type so this
+     * header does not depend on the network layer. Counters are monotonic
+     * per connection; a reader samples twice to get a rate.
+     *
+     * rtt_ms is 0 when unknown (no probe answered yet, or link down).
+     */
+    struct LinkMetrics {
+        u64 tx_packets   = 0;  ///< Packets handed to the transport
+        u64 rx_packets   = 0;  ///< Complete packets received
+        u64 tx_errors    = 0;  ///< Sends that did not complete
+        u64 rx_oversized = 0;  ///< Packets too big for the caller's buffer
+        u64 rx_skipped   = 0;  ///< Packets dropped, over the reassembly buffer
+        u32 rtt_ms       = 0;  ///< Last round trip, 0 = unknown
+        u32 rtt_samples  = 0;  ///< Probes answered
+        u32 rtt_lost     = 0;  ///< Probes unanswered
+    };
+
+    /**
+     * @brief Publish link metrics
+     *
+     * Called from the receive thread once per iteration. Also updates the
+     * legacy RTT slot so GetLastRtt() keeps working.
+     *
+     * @param metrics Snapshot from the transport
+     */
+    /// @gdb{tag="LDN:STATE", msg="SetLinkMetrics: rtt=%u lost=%u", args="$x1, $x2"}
+    void SetLinkMetrics(const LinkMetrics& metrics);
+
+    /**
+     * @brief Read the last published link metrics
+     *
+     * @return Snapshot, zeroed if nothing has been published
+     */
+    /// @gdb{tag="LDN:STATE", msg="GetLinkMetrics"}
+    LinkMetrics GetLinkMetrics() const;
+
+    // =========================================================================
     // Reconnect Request
     // =========================================================================
 
@@ -355,6 +398,7 @@ private:
     u8 m_local_node_id = 0;
     bool m_is_host = false;
     u32 m_last_rtt_ms = 0;
+    LinkMetrics m_link_metrics{};
     bool m_reconnect_requested = false;
     std::atomic<u32> m_active_sessions{0};  ///< Active IPC session count (ldn:u + bsd:u)
     std::unordered_set<u64> m_ldn_games;  ///< Set of program_ids with LDN support

@@ -534,6 +534,14 @@ void RyuLdnClient::update(uint64_t current_time_ms) {
     m_last_update_time_ms = current_time_ms;
     ConnectionState state = m_state_machine.get_state();
 
+    // Drive the transport's own RTT probe and mirror its last measurement.
+    // m_last_rtt_ms used to be initialised to 0 and never written, so
+    // get_last_rtt_ms() — and ryu:cfg GetLastRtt behind it — always read 0.
+    if (m_tcp_client) {
+        m_tcp_client->poll_link_metrics(current_time_ms);
+        m_last_rtt_ms = m_tcp_client->get_transport_counters().rtt_ms;
+    }
+
     switch (state) {
         case ConnectionState::Disconnected:
             // Nothing to do
@@ -785,6 +793,17 @@ ClientResult RyuLdnClient::get_last_connect_result() const {
  */
 uint64_t RyuLdnClient::get_last_rtt_ms() const {
     return m_last_rtt_ms;
+}
+
+/**
+ * @brief Read the transport's link counters
+ */
+TransportCounters RyuLdnClient::get_transport_counters() const {
+    std::scoped_lock lock(m_conn_mutex);
+    if (!m_tcp_client) {
+        return {};
+    }
+    return m_tcp_client->get_transport_counters();
 }
 
 // ============================================================================
@@ -1172,7 +1191,9 @@ ClientOpResult RyuLdnClient::send_initialize() {
         return ClientOpResult::SendFailed;
     }
     if (m_config.passphrase[0] != '\0') {
-        LOG_INFO("Sent passphrase: %s", m_config.passphrase);
+        // Length only: the passphrase is the shared room code, and the log
+        // file sits on the SD card where any homebrew can read it.
+        LOG_INFO("Sent passphrase (%zu chars)", std::strlen(m_config.passphrase));
     } else {
         LOG_VERBOSE("Sent empty passphrase (public rooms)");
     }

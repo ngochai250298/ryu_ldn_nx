@@ -67,6 +67,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <utility>
@@ -460,6 +461,15 @@ public:
      */
     ClientResult set_nodelay(bool enable) override;
 
+    /**
+     * @brief Read the link counters
+     *
+     * Plain TCP measures no RTT, so rtt_ms stays 0 ("unknown") here;
+     * WssClient overrides this and fills it in. @see TransportCounters
+     */
+    /// @gdb{tag="NETWORK:TCP", msg="TcpClient::get_transport_counters"}
+    TransportCounters get_transport_counters() const override;
+
 protected:
     Socket m_socket;                                 ///< Underlying TCP socket
     protocol::PacketBuffer<0x2000> m_recv_buffer;    ///< Buffer for TCP stream reassembly (8KB - saves 56KB!)
@@ -472,6 +482,24 @@ protected:
     // with each other.
     mutable ::ams::os::Mutex m_send_mutex{false};
     mutable ::ams::os::Mutex m_recv_mutex{false};
+
+    /**
+     * @brief Link counters (see TransportCounters)
+     *
+     * Atomic rather than mutex-guarded: sends and receives run on different
+     * threads and a counter bump must never wait on the other side's lock.
+     * relaxed ordering is enough — these are diagnostics, not synchronisation.
+     */
+    std::atomic<uint64_t> m_tx_packets{0};
+    std::atomic<uint64_t> m_rx_packets{0};
+    std::atomic<uint64_t> m_tx_errors{0};
+    std::atomic<uint64_t> m_rx_oversized{0};
+    std::atomic<uint64_t> m_rx_skipped{0};
+
+    /** @brief Bump one counter without ordering guarantees */
+    static void bump(std::atomic<uint64_t>& counter) {
+        counter.fetch_add(1, std::memory_order_relaxed);
+    }
 
     /**
      * @brief Convert SocketResult to ClientResult

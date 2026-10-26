@@ -659,9 +659,97 @@ ClientResult WssClient::fail(const char* status) {
 SocketResult WssClient::send_bytes(const uint8_t* data, size_t size) {
     std::scoped_lock lk(m_tls_mutex);
     if (!m_ws_ready) {
+        bump(m_tx_errors);
         return SocketResult::NotConnected;
     }
-    return write_frame_locked(ws::OPCODE_BINARY, data, size);
+    // Counted here rather than in TcpClient::send_bytes: this override does
+    // not chain to the base, so the base counter never sees a wss send.
+    SocketResult result = write_frame_locked(ws::OPCODE_BINARY, data, size);
+    if (result == SocketResult::Success) {
+        bump(m_tx_packets);
+    } else {
+        bump(m_tx_errors);
+    }
+    return result;
+}
+
+// =============================================================================
+// Link metrics
+// =============================================================================
+
+TransportCounters WssClient::get_transport_counters() const {
+    TransportCounters out = TcpClient::get_transport_counters();
+    out.rtt_ms      = m_rtt_ms.load(std::memory_order_relaxed);
+    out.rtt_samples = m_rtt_samples.load(std::memory_order_relaxed);
+    out.rtt_lost    = m_rtt_lost.load(std::memory_order_relaxed);
+    return out;
+}
+
+void WssClient::poll_link_metrics(uint64_t now_ms) {
+    if (!m_ws_ready) {
+        // Nothing to measure, and a stale reading would be worse than none:
+        // the overlay must not show the last good RTT of a dead link.
+        m_rtt_probe_token.store(0, std::memory_order_relaxed);
+        m_rtt_pong_token.store(0, std::memory_order_relaxed);
+        m_rtt_ms.store(0, std::memory_order_relaxed);
+        return;
+    }
+
+    const uint64_t in_flight = m_rtt_probe_token.load(std::memory_order_relaxed);
+
+    // 1. Match a pong against the probe in flight.
+    if (in_flight != 0) {
+        const uint64_t echoed = m_rtt_pong_token.load(std::memory_order_relaxed);
+        if (echoed == in_flight) {
+            const uint64_t sent = m_rtt_probe_sent_ms.load(std::memory_order_relaxed);
+            const uint64_t rtt  = now_ms >= sent ? now_ms - sent : 0;
+            // Clamp: a measurement that long means the link is already gone,
+            // and u32 ms is plenty for anything playable.
+            m_rtt_ms.store(static_cast<uint32_t>(rtt > 60000 ? 60000 : rtt),
+                           std::memory_order_relaxed);
+            m_rtt_samples.fetch_add(1, std::memory_order_relaxed);
+            m_rtt_probe_token.store(0, std::memory_order_relaxed);
+            m_rtt_pong_token.store(0, std::memory_order_relaxed);
+        } else if (now_ms - m_rtt_probe_sent_ms.load(std::memory_order_relaxed)
+                       >= RTT_PROBE_TIMEOUT_MS) {
+            // Unanswered. Count it and let the next interval try again; a
+            // lost probe is not grounds for tearing down the connection,
+            // the relay's own 10 s ping already covers liveness.
+            m_rtt_lost.fetch_add(1, std::memory_order_relaxed);
+            m_rtt_probe_token.store(0, std::memory_order_relaxed);
+        } else {
+            return;  // still waiting
+        }
+    }
+
+    // 2. Send the next probe if it is due.
+    if (now_ms < m_rtt_next_probe_ms.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    // Token is the send time, which is unique per probe and lets a pong be
+    // matched without keeping a table.
+    const uint64_t token = now_ms != 0 ? now_ms : 1;  // 0 means "no probe"
+    uint8_t payload[sizeof(token)];
+    std::memcpy(payload, &token, sizeof(token));
+
+    SocketResult result;
+    {
+        std::scoped_lock lk(m_tls_mutex);
+        if (!m_ws_ready) {
+            return;
+        }
+        result = write_frame_locked(ws::OPCODE_PING, payload, sizeof(payload));
+    }
+
+    m_rtt_next_probe_ms.store(now_ms + RTT_PROBE_INTERVAL_MS, std::memory_order_relaxed);
+    if (result == SocketResult::Success) {
+        m_rtt_probe_sent_ms.store(now_ms, std::memory_order_relaxed);
+        m_rtt_pong_token.store(0, std::memory_order_relaxed);
+        m_rtt_probe_token.store(token, std::memory_order_relaxed);
+    }
+    // A failed probe is not counted as lost: the send never left, and a
+    // broken transport is reported through receive_packet instead.
 }
 
 /**
@@ -761,6 +849,9 @@ ClientResult WssClient::receive_into_buffer(int32_t timeout_ms) {
             // Head is incomplete, so every buffered byte belongs to it
             LOG_WARN("WssClient: skipping %zu-byte packet (type %u), larger than the receive buffer",
                      packet_size, header.type);
+            // Counted so a game that outgrows the 8 KB reassembly buffer
+            // shows up as dropped packets instead of an unexplained stall.
+            bump(m_rx_skipped);
             m_skip_remaining = packet_size - m_recv_buffer.size();
             m_recv_buffer.reset();
         }
@@ -960,8 +1051,17 @@ ClientResult WssClient::finish_control_frame() {
             }
             return ClientResult::Success;
         }
-        case ws::OPCODE_PONG:
+        case ws::OPCODE_PONG: {
+            // Publish the echoed token for poll_link_metrics to time. Only an
+            // 8-byte payload can be one of ours; the relay may also send an
+            // unsolicited pong, which carries something else (or nothing).
+            if (m_control_size == sizeof(uint64_t)) {
+                uint64_t echoed = 0;
+                std::memcpy(&echoed, m_control, sizeof(echoed));
+                m_rtt_pong_token.store(echoed, std::memory_order_relaxed);
+            }
             return ClientResult::Success;
+        }
         default: {
             // Close: echo the code back, then drop the connection
             const unsigned code = m_control_size >= 2 ? ((m_control[0] << 8) | m_control[1]) : 1005;

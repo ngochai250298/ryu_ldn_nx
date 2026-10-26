@@ -702,6 +702,7 @@ ClientResult TcpClient::receive_packet(protocol::PacketId& type,
 
     if (packet_payload_size > payload_buffer_size) {
         // Don't consume the packet - let caller provide larger buffer
+        bump(m_rx_oversized);
         return ClientResult::BufferTooSmall;
     }
 
@@ -714,6 +715,7 @@ ClientResult TcpClient::receive_packet(protocol::PacketId& type,
     m_recv_buffer.consume(packet_size);
 
     type = static_cast<protocol::PacketId>(header.type);
+    bump(m_rx_packets);
     return ClientResult::Success;
 }
 
@@ -797,7 +799,30 @@ ClientResult TcpClient::socket_to_client_result(SocketResult socket_result) {
  * (e.g. WssClient) override this.
  */
 SocketResult TcpClient::send_bytes(const uint8_t* data, size_t size) {
-    return m_socket.send_all(data, size);
+    SocketResult result = m_socket.send_all(data, size);
+    if (result == SocketResult::Success) {
+        bump(m_tx_packets);
+    } else {
+        bump(m_tx_errors);
+    }
+    return result;
+}
+
+/**
+ * @brief Read the link counters
+ *
+ * Copied field by field out of the atomics; no lock, so the snapshot can
+ * straddle an increment. That is fine for diagnostics.
+ */
+TransportCounters TcpClient::get_transport_counters() const {
+    TransportCounters out;
+    out.tx_packets   = m_tx_packets.load(std::memory_order_relaxed);
+    out.rx_packets   = m_rx_packets.load(std::memory_order_relaxed);
+    out.tx_errors    = m_tx_errors.load(std::memory_order_relaxed);
+    out.rx_oversized = m_rx_oversized.load(std::memory_order_relaxed);
+    out.rx_skipped   = m_rx_skipped.load(std::memory_order_relaxed);
+    // rtt_ms / rtt_samples / rtt_lost stay 0: plain TCP runs no probe.
+    return out;
 }
 
 /**

@@ -78,6 +78,32 @@ inline const char* client_result_to_string(ClientResult result) {
 }
 
 // =============================================================================
+// Transport Counters
+// =============================================================================
+
+/**
+ * @brief Link-quality counters kept by a transport
+ *
+ * Plain POD so it can be copied out under a lock and handed to IPC without
+ * allocating. Counters are monotonic for the lifetime of the transport;
+ * a reader that wants a rate samples twice and subtracts.
+ *
+ * `rtt_ms` is 0 when no measurement is available (no probe answered yet, or
+ * a transport that cannot measure). 0 therefore means "unknown", never
+ * "instant" — callers must show it as such.
+ */
+struct TransportCounters {
+    uint64_t tx_packets   = 0;  ///< Encoded packets handed to the transport
+    uint64_t rx_packets   = 0;  ///< Complete packets returned to the caller
+    uint64_t tx_errors    = 0;  ///< Sends that did not complete
+    uint64_t rx_oversized = 0;  ///< Packets too big for the caller's buffer
+    uint64_t rx_skipped   = 0;  ///< Packets dropped: bigger than the reassembly buffer
+    uint32_t rtt_ms       = 0;  ///< Last measured round trip, 0 = unknown
+    uint32_t rtt_samples  = 0;  ///< Probes answered so far
+    uint32_t rtt_lost     = 0;  ///< Probes that went unanswered
+};
+
+// =============================================================================
 // ITcpClient Interface
 // =============================================================================
 
@@ -317,6 +343,28 @@ public:
      * @return ClientResult indicating success or failure
      */
     virtual ClientResult set_nodelay(bool enable) = 0;
+
+    /**
+     * @brief Read this transport's link counters
+     *
+     * Not pure: a transport that measures nothing keeps the zeroed default,
+     * which reads as "unknown" rather than as a perfect link. This also
+     * keeps MockTcpClient and any other test double compiling unchanged.
+     *
+     * @return Snapshot of the counters
+     */
+    virtual TransportCounters get_transport_counters() const { return {}; }
+
+    /**
+     * @brief Drive link measurement
+     *
+     * Called from the receive loop with its monotonic clock, so the
+     * transport needs no clock of its own (host tests have no armGetSystemTick).
+     * A transport that cannot measure ignores it.
+     *
+     * @param now_ms Current monotonic time in milliseconds
+     */
+    virtual void poll_link_metrics(uint64_t now_ms) { (void)now_ms; }
 };
 
 } // namespace ryu_ldn::network

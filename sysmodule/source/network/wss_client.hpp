@@ -231,6 +231,36 @@ public:
                                 size_t& payload_size,
                                 int32_t timeout_ms = -1) override;
 
+    /**
+     * @brief Read the link counters, including a real RTT
+     *
+     * @see poll_link_metrics for how rtt_ms is obtained
+     */
+    /// @gdb{tag="NETWORK:TCP", msg="WssClient::get_transport_counters"}
+    TransportCounters get_transport_counters() const override;
+
+    /**
+     * @brief Send and time WebSocket ping/pong probes
+     *
+     * RTT is measured at the WebSocket layer (RFC 6455 opcodes 0x9/0xA),
+     * not with the RyuLdn `Ping` packet: that protocol is one-directional
+     * — only the server initiates pings (Requester=0) and the relay ignores
+     * client-initiated ones, so a RyuLdn-level probe always times out. A
+     * control frame instead has to be answered by any conformant endpoint
+     * and costs 2 bytes of header plus an 8-byte payload.
+     *
+     * Call once per receive-loop iteration, right after update(). Pongs are
+     * matched by echoed payload, so a stray or stale pong is ignored.
+     *
+     * The reported RTT includes up to one loop iteration of our own
+     * scheduling, because the pong is matched here rather than inside the
+     * frame decoder. That is ~1 ms against a relay that is tens of ms away.
+     *
+     * @param now_ms Current monotonic time in milliseconds
+     */
+    /// @gdb{tag="NETWORK:TCP", msg="WssClient::poll_link_metrics"}
+    void poll_link_metrics(uint64_t now_ms) override;
+
 protected:
     ClientResult receive_into_buffer(int32_t timeout_ms) override;
     SocketResult send_bytes(const uint8_t* data, size_t size) override;
@@ -259,6 +289,19 @@ private:
     size_t m_skip_remaining = 0;             ///< Bytes left of an oversized packet being dropped
     uint8_t m_control[ws::MAX_CONTROL_PAYLOAD];
     size_t m_control_size = 0;
+
+    // RTT probe (see poll_link_metrics). The decoder thread publishes the
+    // echoed payload here; poll_link_metrics matches and times it. Atomic
+    // because the pong lands under m_recv_mutex while poll runs without it.
+    static constexpr uint64_t RTT_PROBE_INTERVAL_MS = 2000;  ///< One probe every 2 s
+    static constexpr uint64_t RTT_PROBE_TIMEOUT_MS  = 8000;  ///< Unanswered after 8 s
+    std::atomic<uint64_t> m_rtt_probe_token{0};   ///< Payload of the probe in flight, 0 = none
+    std::atomic<uint64_t> m_rtt_probe_sent_ms{0}; ///< When it went out
+    std::atomic<uint64_t> m_rtt_pong_token{0};    ///< Payload the relay echoed back
+    std::atomic<uint64_t> m_rtt_next_probe_ms{0}; ///< Earliest time for the next probe
+    std::atomic<uint32_t> m_rtt_ms{0};            ///< Last measurement, 0 = unknown
+    std::atomic<uint32_t> m_rtt_samples{0};       ///< Probes answered
+    std::atomic<uint32_t> m_rtt_lost{0};          ///< Probes that timed out
 
     // Send side: one masked frame is built here (guarded by m_tls_mutex)
     uint8_t m_frame[8 + sizeof(m_send_buffer)];

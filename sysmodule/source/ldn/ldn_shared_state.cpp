@@ -27,6 +27,7 @@ void SharedState::Reset() {
     m_local_node_id = 0;
     m_is_host = false;
     m_last_rtt_ms = 0;
+    m_link_metrics = LinkMetrics{};
     m_reconnect_requested = false;
 }
 
@@ -51,6 +52,7 @@ void SharedState::SetGameActiveLocked(bool active, u64 process_id) {
         m_local_node_id = 0;
         m_is_host = false;
         m_last_rtt_ms = 0;
+        m_link_metrics = LinkMetrics{};
     }
 }
 
@@ -183,6 +185,22 @@ void SharedState::SetLastRtt(u32 rtt_ms) {
 u32 SharedState::GetLastRtt() const {
     std::scoped_lock lk(m_mutex);
     return m_last_rtt_ms;
+}
+
+// =============================================================================
+// Link Metrics
+// =============================================================================
+
+void SharedState::SetLinkMetrics(const LinkMetrics& metrics) {
+    std::scoped_lock lk(m_mutex);
+    m_link_metrics = metrics;
+    // Keep the legacy slot in step so GetLastRtt() reports the same number.
+    m_last_rtt_ms = metrics.rtt_ms;
+}
+
+SharedState::LinkMetrics SharedState::GetLinkMetrics() const {
+    std::scoped_lock lk(m_mutex);
+    return m_link_metrics;
 }
 
 // =============================================================================
